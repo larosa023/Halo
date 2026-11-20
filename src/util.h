@@ -10,7 +10,7 @@ std::wstring LogPath();
 // Paths
 std::wstring ExePath();
 std::wstring ExeDir();
-std::wstring DataDir();            // %LOCALAPPDATA%\Halo, or .\data next to Halo.exe in portable mode
+std::wstring DataDir();            // %LOCALAPPDATA%\Halo, or .\data next to HaloMouse.exe in portable mode
 std::wstring HangarDataDir();      // %LOCALAPPDATA%\Hangar (Hangar's shared themes, settings and run\ folder)
 std::wstring CacheDir();           // DataDir()\cache
 std::wstring DownloadDir();        // DataDir()\downloads

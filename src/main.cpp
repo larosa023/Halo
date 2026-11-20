@@ -1,11 +1,11 @@
 // Halo - a small, fast control panel for the Finalmouse UltralightX
 //
-//   Halo.exe                         open Halo (or bring the running one to the front)
-//   Halo.exe --tray                  start hidden in the notification area (used by "Start with Windows")
-//   Halo.exe --quit                  ask the running Halo to close (Hangar uses this before updating)
-//   Halo.exe --uninstall             remove Halo (Apps & features and Hangar run this)
-//   Halo.exe --restore-state <file>  start where a previous version left off (Hangar live updates)
-//   Halo.exe --version               exit with code 0 (smoke tests)
+//   HaloMouse.exe                         open Halo (or bring the running one to the front)
+//   HaloMouse.exe --tray                  start hidden in the notification area (used by "Start with Windows")
+//   HaloMouse.exe --quit                  ask the running Halo to close (Hangar uses this before updating)
+//   HaloMouse.exe --uninstall             remove Halo (Apps & features and Hangar run this)
+//   HaloMouse.exe --restore-state <file>  start where a previous version left off (Hangar live updates)
+//   HaloMouse.exe --version               exit with code 0 (smoke tests)
 #include "common.h"
 #include "ui.h"
 #include "util.h"

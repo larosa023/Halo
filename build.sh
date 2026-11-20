@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cross-compile Halo.exe from Linux/macOS with Zig (pip install ziglang, or a zig binary on PATH).
+# Cross-compile HaloMouse.exe from Linux/macOS with Zig (pip install ziglang, or a zig binary on PATH).
 set -euo pipefail
 cd "$(dirname "$0")"
 ./sync-version.sh
@@ -10,9 +10,9 @@ mkdir -p dist
 $ZIG c++ -target x86_64-windows-gnu -std=c++17 -O2 -s -municode \
   -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN \
   -Wall -Wno-unknown-pragmas -Wno-missing-field-initializers \
-  ${EXTRA_FLAGS:-} src/*.cpp res/halo.rc -o "${OUT:-dist/Halo.exe}" \
+  ${EXTRA_FLAGS:-} src/*.cpp res/halo.rc -o "${OUT:-dist/HaloMouse.exe}" \
   -Wl,--subsystem,windows \
   -ld2d1 -ldwrite -lole32 -loleaut32 -luuid -ldwmapi -lshcore -lshell32 -luser32 -lgdi32 -ladvapi32 -lshlwapi \
   -lwindowscodecs -lcomctl32 -luxtheme -lwinhttp -lbcrypt -lversion -lcomdlg32 -lhid -lsetupapi
 rm -f dist/Halo.pdb
-ls -la "${OUT:-dist/Halo.exe}"
+ls -la "${OUT:-dist/HaloMouse.exe}"

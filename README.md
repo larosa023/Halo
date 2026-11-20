@@ -1,6 +1,6 @@
 # Halo
 
-A small, fast control panel for the **Finalmouse UltralightX**. It replaces XPANEL: a native Windows app instead of a browser tab, around 750 KB, with nothing to install.
+A small, fast control panel for the **Finalmouse UltralightX**. The exe is `HaloMouse.exe`, because Discord treats `Halo.exe` as Halo: Combat Evolved. It replaces XPANEL: a native Windows app instead of a browser tab, around 750 KB, with nothing to install.
 
 **Status: v0.1.0.** Part of the larosa023 suite, and works with [Hangar](https://github.com/larosa023/Hangar).
 
@@ -21,13 +21,13 @@ Settings are saved on the mouse, so they stay in effect even when Halo isn't run
 
 ## Run it
 
-Download `Halo.exe` from [Releases](https://github.com/larosa023/Halo/releases) and double-click it, or install it from Hangar. It needs no admin rights. Windows may show SmartScreen the first time because the exe isn't signed yet: **More info → Run anyway**.
+Download `HaloMouse.exe` from [Releases](https://github.com/larosa023/Halo/releases) and double-click it, or install it from Hangar. It needs no admin rights. Windows may show SmartScreen the first time because the exe isn't signed yet: **More info → Run anyway**.
 
 Plug in the UltralightX's 2.4 GHz dongle and turn the mouse on. Halo finds it by itself, including when you plug it in later. Like XPANEL, Halo talks to the mouse through the dongle. If the mouse is on its cable, the dongle can sit on the end of the cable.
 
 - **Tray:** closing the window hides Halo in the notification area. Left-click the icon to open Halo. Right-click it for DPI, polling rate, profiles and Quit
 - **Keyboard:** Ctrl+1 to Ctrl+6 switch pages, F5 reads the mouse again, +/− step the DPI, and Esc hides the window
-- **Portable mode:** put an empty file named `portable` next to `Halo.exe`, and Halo keeps its settings in a `data` folder beside it
+- **Portable mode:** put an empty file named `portable` next to `HaloMouse.exe`, and Halo keeps its settings in a `data` folder beside it
 - **Try it without a mouse:** set `HALO_DEMO=1` before starting Halo, and it shows a pretend mouse
 
 Close XPANEL before using Halo, so they don't both send commands to the mouse at once.

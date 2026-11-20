@@ -28,22 +28,25 @@ jobs:
       - name: Install Zig
         run: pip install ziglang
 
-      - name: Build Halo.exe
+      - name: Build HaloMouse.exe
         run: ./build.sh
 
       - name: Package
         run: |
           cp README.md dist/
           cd dist
-          zip Halo-win-x64.zip Halo.exe README.md
-          sha256sum Halo.exe Halo-win-x64.zip > SHA256SUMS.txt
+          zip Halo-win-x64.zip HaloMouse.exe README.md
+          # Halo 0.1.0 was Halo.exe and its updater looks for that asset: publish the same exe under the
+          # old name too, so 0.1.0 updates itself and then renames itself to HaloMouse.exe
+          cp HaloMouse.exe Halo.exe
+          sha256sum HaloMouse.exe Halo.exe Halo-win-x64.zip > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v4
         with:
           name: Halo-win-x64
           path: |
-            dist/Halo.exe
+            dist/HaloMouse.exe
             dist/SHA256SUMS.txt
 
       # A release is published automatically when HALO_VERSION in src/common.h changes on main
@@ -76,5 +79,6 @@ jobs:
           body_path: CHANGELOG-latest.md
           files: |
             dist/Halo-win-x64.zip
+            dist/HaloMouse.exe
             dist/Halo.exe
             dist/SHA256SUMS.txt

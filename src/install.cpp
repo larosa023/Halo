@@ -62,10 +62,10 @@ void RefreshRegistration() {
 }
 
 bool InstallSelf(std::wstring* error) {
-    std::wstring dir = InstallDir(), target = dir + L"\\Halo.exe";
+    std::wstring dir = InstallDir(), target = dir + L"\\" HALO_EXE_NAME;
     EnsureDir(dir);
     if (!CopyFileW(ExePath().c_str(), target.c_str(), FALSE)) {
-        *error = L"Couldn't copy Halo.exe into " + dir + L" (error " + std::to_wstring(GetLastError()) + L").";
+        *error = L"Couldn't copy HaloMouse.exe into " + dir + L" (error " + std::to_wstring(GetLastError()) + L").";
         return false;
     }
     Register(target);
@@ -101,6 +101,52 @@ static int AskUninstall() {
     return choice == IDYES ? 2 : choice == IDNO ? 1 : 0;
 }
 
+// A running exe can't delete itself: a hidden cmd waits for this process to exit, then removes the
+// files (and the folder, if it's empty by then).
+static void DeleteAfterExit(const std::vector<std::wstring>& files, const std::wstring& dir) {
+    std::wstring cmd = L"cmd.exe /d /c ping -n 3 127.0.0.1 >nul";
+    for (auto& f : files) cmd += L" & del /f /q \"" + f + L"\"";
+    if (!dir.empty()) cmd += L" & rmdir \"" + dir + L"\"";
+    std::vector<wchar_t> buf(cmd.begin(), cmd.end());
+    buf.push_back(0);
+    STARTUPINFOW si{sizeof(si)};
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi{};
+    wchar_t sys[MAX_PATH];
+    GetSystemDirectoryW(sys, MAX_PATH);
+    if (CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, sys, &si, &pi)) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    } else {
+        for (auto& f : files) MoveFileExW(f.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
+    }
+}
+
+bool MigrateExeName(const std::wstring& restoreJson) {
+    std::wstring exe = ExePath();
+    if (!IEquals(PathName(exe), HALO_LEGACY_EXE_NAME)) return false;
+    std::wstring target = ExeDir() + L"\\" HALO_EXE_NAME;
+    bool installed = RunningFromInstallDir() && !IsPortable();
+    if (FileExists(target)) {
+        // a HaloMouse.exe is already here (installed again, or by Hangar): switch to it, remove this one
+        DeleteAfterExit({exe}, L"");
+    } else if (!MoveFileExW(exe.c_str(), target.c_str(), 0)) {   // a running exe can be renamed
+        Log(L"couldn't rename %ls to %ls (error %lu)", exe.c_str(), HALO_EXE_NAME, GetLastError());
+        return false;
+    }
+    if (installed) {
+        DeleteFileW(ShortcutPath().c_str());
+        Register(target);
+    }
+    if (g_cfg.startWithWindows) ApplyStartup(true, target);
+    std::wstring state = DataDir() + L"\\state\\rename-restore.json";
+    EnsureDir(PathParent(state));
+    WriteTextFileAtomic(state, restoreJson);
+    Log(L"renamed to %ls (Discord showed Halo.exe as Halo: Combat Evolved); restarting", HALO_EXE_NAME);
+    return LaunchDetached(target, L"--restore-state \"" + state + L"\"");
+}
+
 int Uninstall() {
     int choice = AskUninstall();
     if (choice == 0) return 1;
@@ -129,25 +175,8 @@ int Uninstall() {
         op.fFlags = FOF_NO_UI;
         SHFileOperationW(&op);
     }
-    // a running exe can't delete itself: a hidden cmd waits for us to exit, then removes the exe
-    std::wstring exe = ExePath(), dir = ExeDir();
-    bool removeDir = RunningFromInstallDir();
-    std::wstring cmd = L"cmd.exe /d /c ping -n 3 127.0.0.1 >nul & del /f /q \"" + exe + L"\" & del /f /q \"" + exe + L".old\"";
-    if (removeDir) cmd += L" & rmdir \"" + dir + L"\"";
-    std::vector<wchar_t> buf(cmd.begin(), cmd.end());
-    buf.push_back(0);
-    STARTUPINFOW si{sizeof(si)};
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    PROCESS_INFORMATION pi{};
-    wchar_t sys[MAX_PATH];
-    GetSystemDirectoryW(sys, MAX_PATH);
-    if (CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, sys, &si, &pi)) {
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-    } else {
-        MoveFileExW(exe.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
-    }
+    std::wstring exe = ExePath();
+    DeleteAfterExit({exe, exe + L".old", ExeDir() + L"\\" HALO_LEGACY_EXE_NAME}, RunningFromInstallDir() ? ExeDir() : L"");
     return 0;
 }
 

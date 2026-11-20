@@ -111,7 +111,7 @@ void Check(HWND notify, bool force) {
     bool beta = g_cfg.beta;
     std::thread([beta, force] {
         PostState(SelfUpdateState::Checking);
-        const std::wstring exeName = L"Halo.exe";
+        const std::wstring exeName = HALO_EXE_NAME;
         std::vector<Release> rels;
         std::wstring err;
         std::string body;
@@ -162,7 +162,7 @@ void Check(HWND notify, bool force) {
             return;
         }
 
-        std::wstring path = DataDir() + L"\\updates\\" + rel.version + L"\\Halo.exe";
+        std::wstring path = DataDir() + L"\\updates\\" + rel.version + L"\\" HALO_EXE_NAME;
         bool ok = FileExists(path) && Sha256File(path) == expected;
         if (!ok) {
             int last = -2;
@@ -192,7 +192,7 @@ void Check(HWND notify, bool force) {
             do {
                 std::wstring n = fd.cFileName;
                 if (n == L"." || n == L".." || n == rel.version || !(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-                DeleteFileW((updates + L"\\" + n + L"\\Halo.exe").c_str());
+                DeleteFileW((updates + L"\\" + n + L"\\" HALO_EXE_NAME).c_str());
                 RemoveDirectoryW((updates + L"\\" + n).c_str());
             } while (FindNextFileW(f, &fd));
             FindClose(f);
@@ -214,12 +214,12 @@ bool Apply(HWND hwnd, const std::wstring& newExe, const std::wstring& version, s
     // 1. swap the files (Windows lets a running exe be renamed, not overwritten)
     DeleteFileW(old.c_str());
     if (!MoveFileExW(exe.c_str(), old.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-        *error = L"Halo can't update itself in " + ExeDir() + L" (no permission). Move Halo.exe to a folder you own.";
+        *error = L"Halo can't update itself in " + ExeDir() + L" (no permission). Move HaloMouse.exe to a folder you own.";
         return false;
     }
     if (!CopyFileW(newExe.c_str(), exe.c_str(), FALSE)) {
         MoveFileExW(old.c_str(), exe.c_str(), MOVEFILE_REPLACE_EXISTING);
-        *error = L"Couldn't put the new Halo.exe in place.";
+        *error = L"Couldn't put the new HaloMouse.exe in place.";
         return false;
     }
     // 2. hand over: hide, release the single-instance lock, start the new copy
@@ -304,7 +304,7 @@ void FinishAfterUpdate(const AfterUpdate& a) {
         if (!ver.empty() && ver.find_first_of(L"\\/:") == std::wstring::npos) {
             std::wstring dir = VersionsDir() + L"\\" + ver;
             EnsureDir(dir);
-            kept = CopyFileW(old.c_str(), (dir + L"\\Halo.exe").c_str(), FALSE) != 0;
+            kept = CopyFileW(old.c_str(), (dir + L"\\" HALO_EXE_NAME).c_str(), FALSE) != 0;
         }
         for (int i = 0; i < 10 && FileExists(old); ++i) { if (DeleteFileW(old.c_str())) break; Sleep(1000); }
         if (FileExists(old)) MoveFileExW(old.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
@@ -326,7 +326,8 @@ std::vector<Previous> PreviousVersions() {
     do {
         std::wstring n = fd.cFileName;
         if (n == L"." || n == L".." || !(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-        std::wstring exe = VersionsDir() + L"\\" + n + L"\\Halo.exe";
+        std::wstring exe = VersionsDir() + L"\\" + n + L"\\" HALO_EXE_NAME;
+        if (!FileExists(exe)) exe = VersionsDir() + L"\\" + n + L"\\" HALO_LEGACY_EXE_NAME;
         if (FileExists(exe) && CompareVersions(n, HALO_VERSION) != 0) out.push_back({n, exe});
     } while (FindNextFileW(f, &fd));
     FindClose(f);

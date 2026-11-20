@@ -3,9 +3,9 @@
 // Halo is one exe that can live anywhere. To update it:
 //   1. a background job finds the newest release of larosa023/Halo on the chosen channel (from Hangar's release index when it covers Halo,
 //      otherwise the GitHub API),
-//      downloads Halo.exe and verifies its SHA-256 (GitHub digest + SHA256SUMS.txt)
+//      downloads HaloMouse.exe and verifies its SHA-256 (GitHub digest + SHA256SUMS.txt)
 //   2. when nothing is installing and the update won't interrupt you, the running Halo saves
-//      where you are, renames itself to Halo.exe.old, puts the new exe in its place, hides its
+//      where you are, renames itself to HaloMouse.exe.old, puts the new exe in its place, hides its
 //      window and starts the new one with --after-update
 //   3. the new Halo opens where you were and signals "healthy"; the old one exits.
 //      If the new one doesn't signal within 20 seconds (or quits), the old one puts itself back,

@@ -1,13 +1,4 @@
-## Halo 0.1.0
+## Halo 0.1.1
 
-The first release: a small, fast replacement for XPANEL for the Finalmouse UltralightX.
-
-- **Battery:** level, voltage and charging state, a battery ring in the tray, and a low-battery alert
-- **DPI:** any value from 50 to 26,000, presets you can edit, and a ±50 stepper (Shift for 10)
-- **Polling rate** (500 to 8000 Hz), **Motion Sync** and **lift-off distance**
-- **Tournament scroll** and the **dongle light**
-- **Signal strength**, firmware versions and serial number
-- **Profiles:** save your settings and switch from the window or the tray
-- **14 themes**, accent colors, theme files, and **Match Hangar**
-- **Updates itself** with verified downloads and automatic rollback
-- **Works with Hangar:** live updates, live themes, `--quit` and `--uninstall`
+- **Discord no longer shows "Playing Halo: Combat Evolved."** Discord recognizes games by their exe name, and `Halo.exe` is Halo CE's. Halo's exe is now **`HaloMouse.exe`**. The app is still called Halo.
+- When this version starts as `Halo.exe`, it renames itself once and restarts on the same page. It also points your Start menu shortcut, the Apps & features entry and the startup entry at the new name.

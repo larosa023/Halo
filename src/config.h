@@ -43,4 +43,4 @@ void PruneSkippedVersions(const std::wstring& current);
 bool ReadHangarTheme(std::wstring& theme, std::wstring& accent);
 
 // Start with Windows (HKCU\...\Run\Halo)
-void ApplyStartup(bool on);
+void ApplyStartup(bool on, const std::wstring& exe = L"");   // exe defaults to this one

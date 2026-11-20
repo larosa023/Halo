@@ -144,11 +144,11 @@ bool ReadHangarTheme(std::wstring& theme, std::wstring& accent) {
     return true;
 }
 
-void ApplyStartup(bool on) {
+void ApplyStartup(bool on, const std::wstring& exe) {
     HKEY run;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_SET_VALUE, &run) != ERROR_SUCCESS) return;
     if (on) {
-        std::wstring cmd = L"\"" + ExePath() + L"\" --tray";
+        std::wstring cmd = L"\"" + (exe.empty() ? ExePath() : exe) + L"\" --tray";
         RegSetValueExW(run, L"Halo", 0, REG_SZ, (const BYTE*)cmd.c_str(), (DWORD)((cmd.size() + 1) * sizeof(wchar_t)));
     } else {
         RegDeleteValueW(run, L"Halo");

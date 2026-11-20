@@ -16,4 +16,4 @@ if(MSVC)
   target_link_options(Halo PRIVATE /MANIFEST:NO /ENTRY:wWinMainCRTStartup)   # manifest comes from halo.rc
 endif()
 target_link_libraries(Halo PRIVATE d2d1 dwrite ole32 oleaut32 uuid dwmapi shcore shell32 user32 gdi32 advapi32 shlwapi windowscodecs comctl32 uxtheme winhttp bcrypt version comdlg32 hid setupapi)
-set_target_properties(Halo PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/dist)
+set_target_properties(Halo PROPERTIES OUTPUT_NAME HaloMouse RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/dist)

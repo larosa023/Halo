@@ -14,10 +14,10 @@ This entry in Hangar's `manifest.json` puts Halo in Hangar's library, under Gami
   "description": "Battery, DPI and polling rate for the Finalmouse UltralightX.",
   "category": "gaming",
   "icon": "https://raw.githubusercontent.com/larosa023/Halo/main/res/halo.png",
-  "exe": "Halo.exe",
+  "exe": "HaloMouse.exe",
   "install": {
     "type": "portable",
-    "asset": "Halo.exe",
+    "asset": "HaloMouse.exe",
     "checksums": "SHA256SUMS.txt",
     "dir": "%LOCALAPPDATA%\\Programs\\Halo"
   },
@@ -26,11 +26,11 @@ This entry in Hangar's `manifest.json` puts Halo in Hangar's library, under Gami
 }
 ```
 
-Every release publishes `Halo.exe`, `Halo-win-x64.zip` and `SHA256SUMS.txt`. The tag is `v<version>`, and versions with a `-` are pre-releases (Hangar's Beta channel).
+Every release publishes `HaloMouse.exe`, `Halo-win-x64.zip` and `SHA256SUMS.txt`. The tag is `v<version>`, and versions with a `-` are pre-releases (Hangar's Beta channel).
 
 ## Installing the same way
 
-Hangar copies `Halo.exe` to `%LOCALAPPDATA%\Programs\Halo` and adds a Start menu shortcut and an Apps & features entry. **Settings → Hangar → Install** in Halo does exactly the same. So a copy installed either way is the same install, and Hangar finds it.
+Hangar copies `HaloMouse.exe` to `%LOCALAPPDATA%\Programs\Halo` and adds a Start menu shortcut and an Apps & features entry. **Settings → Hangar → Install** in Halo does exactly the same. So a copy installed either way is the same install, and Hangar finds it.
 
 When Halo runs from that folder, it keeps the Apps & features entry's version current after it updates itself.
 

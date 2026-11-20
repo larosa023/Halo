@@ -89,7 +89,7 @@ static bool g_quitting = false;
 static UINT g_taskbarCreated = 0;
 static HDEVNOTIFY g_devNotify = nullptr;
 
-enum : UINT_PTR { TIMER_ANIM = 1, TIMER_CARET, TIMER_TOAST, TIMER_SELF, TIMER_HEALTHY, TIMER_HANGAR_HEALTH };
+enum : UINT_PTR { TIMER_ANIM = 1, TIMER_CARET, TIMER_TOAST, TIMER_SELF, TIMER_HEALTHY, TIMER_HANGAR_HEALTH, TIMER_MIGRATE };
 static bool g_animTimer = false;
 
 static const float kSidebar = 220;
@@ -1012,7 +1012,7 @@ static void DrawSettings(float x0) {
         if (!installed) Button(D2D1::RectF(s4.right - 150, s4.top + 16, s4.right - 18, s4.top + 48), L"Get Hangar", icon::Globe, Btn::Secondary, Hit::SetHangar);
         else Pill(s4.right - 18, s4.top + 22, running ? L"Connected" : L"Ready", running ? g_t.good : g_t.info, true);
         Divider(s4, s4.top + 64);
-        if (IsPortable()) RowLabel(s4, s4.top + 68, L"Portable copy", L"Settings are kept in the data folder next to Halo.exe", 200);
+        if (IsPortable()) RowLabel(s4, s4.top + 68, L"Portable copy", L"Settings are kept in the data folder next to HaloMouse.exe", 200);
         else if (installedHere) RowLabel(s4, s4.top + 68, L"Installed for this user", install::InstallDir(), 200);
         else {
             RowLabel(s4, s4.top + 68, L"Install Halo", L"Adds Halo to Start and to Apps & features, where Hangar looks for it", 200);
@@ -1377,7 +1377,7 @@ static void Click(const HotRect& h, bool right) {
         case Hit::SetInstall: {
             std::wstring err;
             if (!install::InstallSelf(&err)) { Toast(err, true); break; }
-            std::wstring target = install::InstallDir() + L"\\Halo.exe";
+            std::wstring target = install::InstallDir() + L"\\" HALO_EXE_NAME;
             if (g_cfg.startWithWindows) {
                 // the Run key should point at the installed copy
                 HKEY run;
@@ -1696,6 +1696,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     selfupdate::SignalHealthy(g_after);
                     selfupdate::FinishAfterUpdate(g_after);
                     break;
+                case TIMER_MIGRATE:
+                    // still called Halo.exe (0.1.0 or older): rename and restart once, so Discord stops
+                    // showing "Playing Halo: Combat Evolved"
+                    KillTimer(hwnd, TIMER_MIGRATE);
+                    if (g_edit.active || g_preparingUpdate) { SetTimer(hwnd, TIMER_MIGRATE, 30 * 1000, nullptr); break; }
+                    if (install::MigrateExeName(RestoreJson())) {
+                        SaveWindowPlacement();
+                        ConfigSave();
+                        g_quitting = true;
+                        DestroyWindow(hwnd);
+                    }
+                    break;
                 case TIMER_HANGAR_HEALTH:
                     KillTimer(hwnd, TIMER_HANGAR_HEALTH);
                     ipc::SendHealth();
@@ -1835,7 +1847,8 @@ HWND UiCreate(HINSTANCE inst, const StartOptions& opt) {
     ShowWindow(hwnd, show);
     if (show != SW_HIDE) UpdateWindow(hwnd);
     if (opt.after.active) SetTimer(hwnd, TIMER_HEALTHY, 400, nullptr);
-    SetTimer(hwnd, TIMER_HANGAR_HEALTH, 2000, nullptr);   // Hangar counts this as "the update worked"
+    SetTimer(hwnd, TIMER_HANGAR_HEALTH, 2000, nullptr);
+    if (IEquals(PathName(ExePath()), HALO_LEGACY_EXE_NAME)) SetTimer(hwnd, TIMER_MIGRATE, 6000, nullptr);   // Hangar counts this as "the update worked"
     if (!restoredSummary.empty()) ipc::SendRestored(restoredSummary);
     SetTimer(hwnd, TIMER_SELF, 30 * 1000, nullptr);       // first check 30 s after startup
     return hwnd;
