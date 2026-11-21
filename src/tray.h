@@ -15,7 +15,7 @@ enum : UINT {
 void Create(HWND hwnd);
 void Remove();
 void Recreate();               // Explorer restarted (TaskbarCreated)
-void Update(const mouse::State& s, bool showPercent);
+void Update(const mouse::State& s, bool showPercent, const std::wstring& extra = L"");   // extra: e.g. "About 6 h left"
 void Notify(const std::wstring& title, const std::wstring& text, bool warning);
 void ShowMenu(HWND hwnd, const mouse::State& s);   // the chosen command arrives as WM_COMMAND
 

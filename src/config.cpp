@@ -21,6 +21,11 @@ void ConfigLoad() {
     c.startWithWindows = v.GetBool(L"startWithWindows", c.startWithWindows);
     c.trayPercent = v.GetBool(L"trayPercent", c.trayPercent);
     c.trayHintShown = v.GetBool(L"trayHintShown", c.trayHintShown);
+    c.reduceMotion = v.GetBool(L"reduceMotion", c.reduceMotion);
+    c.showFps = v.GetBool(L"showFps", c.showFps);
+    c.hotkeys = v.GetBool(L"hotkeys", c.hotkeys);
+    c.osd = v.GetBool(L"osd", c.osd);
+    c.autoSwitch = v.GetBool(L"autoSwitch", c.autoSwitch);
     c.lowBattery = std::clamp((int)v.GetNum(L"lowBattery", c.lowBattery), 0, 50);
     c.beta = v.GetBool(L"beta", c.beta);
     c.autoUpdate = v.GetBool(L"autoUpdate", c.autoUpdate);
@@ -49,6 +54,8 @@ void ConfigLoad() {
             pr.dongleLed = std::clamp((int)p.GetNum(L"dongleLed", pr.dongleLed), 0, 2);
             pr.scrollMode = std::clamp((int)p.GetNum(L"scrollMode", pr.scrollMode), 0, 3);
             pr.scrollTimeout = (int)p.GetNum(L"scrollTimeout", pr.scrollTimeout);
+            if (const json::Value* apps = p.Get(L"apps"); apps && apps->type == json::Value::Array)
+                for (auto& a : apps->arr) if (a.type == json::Value::String && !a.s.empty()) pr.apps.push_back(Lower(a.s));
             c.profiles.push_back(pr);
         }
     }
@@ -64,6 +71,11 @@ void ConfigSave() {
     v.Set(L"startWithWindows", json::Value::Boolean(g_cfg.startWithWindows));
     v.Set(L"trayPercent", json::Value::Boolean(g_cfg.trayPercent));
     v.Set(L"trayHintShown", json::Value::Boolean(g_cfg.trayHintShown));
+    v.Set(L"reduceMotion", json::Value::Boolean(g_cfg.reduceMotion));
+    v.Set(L"showFps", json::Value::Boolean(g_cfg.showFps));
+    v.Set(L"hotkeys", json::Value::Boolean(g_cfg.hotkeys));
+    v.Set(L"osd", json::Value::Boolean(g_cfg.osd));
+    v.Set(L"autoSwitch", json::Value::Boolean(g_cfg.autoSwitch));
     v.Set(L"lowBattery", json::Value::Num(g_cfg.lowBattery));
     v.Set(L"beta", json::Value::Boolean(g_cfg.beta));
     v.Set(L"autoUpdate", json::Value::Boolean(g_cfg.autoUpdate));
@@ -89,6 +101,9 @@ void ConfigSave() {
         p.Set(L"dongleLed", json::Value::Num(pr.dongleLed));
         p.Set(L"scrollMode", json::Value::Num(pr.scrollMode));
         p.Set(L"scrollTimeout", json::Value::Num(pr.scrollTimeout));
+        json::Value apps = json::Value::MakeArray();
+        for (auto& a : pr.apps) apps.arr.push_back(json::Value::Str(a));
+        p.Set(L"apps", apps);
         ps.arr.push_back(p);
     }
     v.Set(L"profiles", ps);

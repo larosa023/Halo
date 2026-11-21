@@ -20,10 +20,12 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Protocol tests
+      - name: Unit tests
         run: |
           g++ -std=c++17 -Wall -Isrc tests/protocol_test.cpp src/protocol.cpp -o protocol_test
           ./protocol_test
+          g++ -std=c++17 -Wall -Isrc tests/battery_test.cpp src/battery.cpp -o battery_test
+          ./battery_test
 
       - name: Install Zig
         run: pip install ziglang

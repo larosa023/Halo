@@ -2,7 +2,7 @@
 
 A small, fast control panel for the **Finalmouse UltralightX**. The exe is `HaloMouse.exe`, because Discord treats `Halo.exe` as Halo: Combat Evolved. It replaces XPANEL: a native Windows app instead of a browser tab, around 750 KB, with nothing to install.
 
-**Status: v0.1.0.** Part of the larosa023 suite, and works with [Hangar](https://github.com/larosa023/Hangar).
+**Status: v0.2.0.** Part of the larosa023 suite, and works with [Hangar](https://github.com/larosa023/Hangar).
 
 ## What it does
 
@@ -13,7 +13,11 @@ A small, fast control panel for the **Finalmouse UltralightX**. The exe is `Halo
 | **Tracking** | Polling rate (500 to 8000 Hz), Motion Sync, lift-off distance (1 or 2 mm) |
 | **Scroll & dongle** | Tournament scroll (direction and timeout) and the dongle light (off, battery color, solid white) |
 | **Details** | Signal strength, link state, mouse and dongle firmware, serial number |
-| **Profiles** | Save your settings, rename them, and switch from the window or the tray menu |
+| **Profiles** | Save your settings and switch from the window, the tray or Ctrl+Alt+P. Attach games so a profile turns on by itself while that game is in front |
+| **Battery history** | A 7-day graph, the time left at your usual pace, and when you last charged |
+| **Polling test** | The report rate Windows actually receives while you move the mouse |
+| **Hotkeys and OSD** | Ctrl+Alt+Up/Down steps through DPI presets, with a small on-screen popup |
+| **Smooth** | Animates at your monitor's refresh rate and draws nothing when idle |
 | **Themes** | The suite's 14 themes, accent colors and theme files, plus **Match Hangar** |
 | **Updates** | Updates itself with checksum-verified downloads, automatic rollback and a Stable or Beta channel |
 

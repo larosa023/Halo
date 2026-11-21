@@ -40,6 +40,9 @@ uint32_t SystemAccent();                      // 0xRRGGBB
 bool BackdropSupported();
 void ApplyWindowTheme(HWND hwnd, const Theme& t);
 
+// A layout for s in f, boxed to w x h, kept across frames (owned by the cache)
+IDWriteTextLayout* CachedLayout(const std::wstring& s, IDWriteTextFormat* f, float w, float h);
+
 struct Canvas {
     ID2D1RenderTarget* rt = nullptr;
     ID2D1SolidColorBrush* br = nullptr;
@@ -64,10 +67,14 @@ struct Canvas {
         br->SetColor(c);
         rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), r, r), br);
     }
+    // Text is drawn from cached layouts: laying text out is the most expensive part of a frame, and
+    // most of it is the same from one frame to the next
     void Text(const std::wstring& s, IDWriteTextFormat* f, const D2D1_RECT_F& r, D2D1_COLOR_F c) {
-        if (!f || s.empty()) return;
+        if (!f || s.empty() || r.right <= r.left || r.bottom <= r.top) return;
+        IDWriteTextLayout* l = CachedLayout(s, f, r.right - r.left, r.bottom - r.top);
+        if (!l) return;
         br->SetColor(c);
-        rt->DrawText(s.c_str(), (UINT32)s.size(), f, r, br, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        rt->DrawTextLayout(D2D1::Point2F(r.left, r.top), l, br, D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
     void Glyph(wchar_t g, IDWriteTextFormat* f, const D2D1_RECT_F& r, D2D1_COLOR_F c) {
         wchar_t s[2] = {g, 0};

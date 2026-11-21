@@ -1,5 +1,7 @@
 // Halo - Direct2D / DirectWrite helpers and the theme
 #include "gfx.h"
+#include <cmath>
+#include <algorithm>
 #include "util.h"
 #include <dwmapi.h>
 #include <map>
@@ -62,15 +64,48 @@ IDWriteTextFormat* Format(float size, DWRITE_FONT_WEIGHT weight, DWRITE_TEXT_ALI
     return f;
 }
 
+struct LayoutKey {
+    std::wstring s;
+    IDWriteTextFormat* f;
+    int w, h;
+    bool operator<(const LayoutKey& o) const {
+        if (f != o.f) return f < o.f;
+        if (w != o.w) return w < o.w;
+        if (h != o.h) return h < o.h;
+        return s < o.s;
+    }
+};
+
+IDWriteTextLayout* CachedLayout(const std::wstring& s, IDWriteTextFormat* f, float w, float h) {
+    static std::map<LayoutKey, IDWriteTextLayout*> cache;
+    LayoutKey k{s, f, (int)std::lround(w * 4), (int)std::lround(h * 4)};
+    auto it = cache.find(k);
+    if (it != cache.end()) return it->second;
+    if (cache.size() > 3000) {   // text that's gone (scrolled lists, changing numbers): start over
+        for (auto& e : cache) e.second->Release();
+        cache.clear();
+    }
+    IDWriteTextLayout* l = nullptr;
+    if (FAILED(dw->CreateTextLayout(s.c_str(), (UINT32)s.size(), f, std::max(0.0f, w), std::max(0.0f, h), &l))) return nullptr;
+    cache.emplace(std::move(k), l);
+    return l;
+}
+
 float MeasureWidth(const std::wstring& s, IDWriteTextFormat* f) {
     if (!f || s.empty()) return 0;
-    IDWriteTextLayout* l = nullptr;
+    static std::map<std::pair<IDWriteTextFormat*, std::wstring>, float> cache;
+    auto key = std::make_pair(f, s);
+    auto hit = cache.find(key);
+    if (hit != cache.end()) return hit->second;
+    if (cache.size() > 4000) cache.clear();
     float w = 0;
+    IDWriteTextLayout* l = nullptr;
     if (SUCCEEDED(dw->CreateTextLayout(s.c_str(), (UINT32)s.size(), f, 10000.f, 1000.f, &l))) {
         DWRITE_TEXT_METRICS m;
         if (SUCCEEDED(l->GetMetrics(&m))) w = m.widthIncludingTrailingWhitespace;
         l->Release();
     }
+    cache[key] = w;
     return w;
 }
 

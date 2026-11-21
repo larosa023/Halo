@@ -168,7 +168,7 @@ void Remove() {
     s_icon = nullptr;
 }
 
-void Update(const mouse::State& st, bool showPercent) {
+void Update(const mouse::State& st, bool showPercent, const std::wstring& extra) {
     if (!s_hwnd) return;
     bool connected = st.conn == mouse::State::Connected;
     int pct = connected ? st.BatteryPercent() : -1;
@@ -178,7 +178,7 @@ void Update(const mouse::State& st, bool showPercent) {
     if (!connected) tip += st.wiredOnly ? L"\nMouse on cable · plug in the dongle" : L"\nDongle not found";
     else if (asleep) tip += L"\nMouse asleep" + (pct >= 0 ? L" · last seen " + std::to_wstring(pct) + L"%" : L"");
     else {
-        if (pct >= 0) tip += L"\nBattery " + std::to_wstring(pct) + L"%" + (charging ? L" · charging" : L"");
+        if (pct >= 0) tip += L"\nBattery " + std::to_wstring(pct) + L"%" + (charging ? L" · charging" : extra.empty() ? L"" : L" · " + extra);
         if (st.t.dpi > 0) tip += L"\n" + std::to_wstring(st.t.dpi) + L" DPI";
         if (st.t.pollingHz > 0) tip += L" · " + std::to_wstring(st.t.pollingHz) + L" Hz";
     }

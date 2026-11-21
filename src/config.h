@@ -6,6 +6,7 @@
 struct Profile {
     std::wstring name;
     int dpi = 800, polling = 1000, motionSync = 0, liftOff = 1, dongleLed = 1, scrollMode = 0, scrollTimeout = 500;
+    std::vector<std::wstring> apps;     // exe names (lower case): switch to this profile while one is in front
 };
 
 struct Config {
@@ -18,7 +19,12 @@ struct Config {
     bool closeToTray = true;            // the X button hides Halo in the tray instead of quitting
     bool startWithWindows = false;      // starts hidden in the tray
     bool trayPercent = true;            // draw the battery level in the tray icon
-    bool trayHintShown = false;         // "Halo is still running in the tray" was shown once
+    bool trayHintShown = false;
+    bool reduceMotion = false;          // no animations (Windows' "Show animations" off does the same)
+    bool showFps = false;               // frame-rate counter in the corner
+    bool hotkeys = true;                // Ctrl+Alt+Up/Down: DPI presets, Ctrl+Alt+P: next profile
+    bool osd = true;                    // on-screen display for changes made outside the window
+    bool autoSwitch = true;             // per-app profiles         // "Halo is still running in the tray" was shown once
     // battery alerts
     int lowBattery = 15;                // percent; 0 = off
     // DPI presets shown as chips

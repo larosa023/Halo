@@ -18,7 +18,7 @@
 #include <cstdint>
 
 #ifndef HALO_VERSION
-#define HALO_VERSION L"0.1.1"
+#define HALO_VERSION L"0.2.0"
 #endif
 #define HALO_APP_ID L"halo"
 #define HALO_REPO_OWNER L"larosa023"

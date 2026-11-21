@@ -12,6 +12,10 @@
 #include "tray.h"
 #include "hangar.h"
 #include "install.h"
+#include "battery.h"
+#include "osd.h"
+#include <psapi.h>
+#include <ctime>
 #include <windowsx.h>
 #include <shellapi.h>
 #include <commdlg.h>
@@ -32,9 +36,10 @@ static const wchar_t* kPageIds[] = {L"overview", L"performance", L"extras", L"pr
 enum class Hit {
     None, Nav, ToastClose, Retry, GoPage,
     DpiPreset, DpiPresetAdd, DpiStep, DpiField, Poll, MotionSync, LiftOff, ScrollMode, ScrollTimeout, DongleLed,
-    ProfileSave, ProfileApply, ProfileDelete, ProfileName,
+    ProfileSave, ProfileApply, ProfileDelete, ProfileName, ProfileAddApp, ProfileRemoveApp, SetAuto,
+    SetHotkeys, SetOsd, PollTest,
     ThemePick, AccentPick, ThemeExport, ThemeFolder, ThemeReload,
-    SetClose, SetStartup, SetTrayPct, SetLow, SetOpenData, SetOpenLog, SetRepo, SetInstall, SetHangar, SetRefresh,
+    SetClose, SetStartup, SetTrayPct, SetLow, SetMotion, SetFps, SetOpenData, SetOpenLog, SetRepo, SetInstall, SetHangar, SetRefresh,
     SelfRestart, SelfCheck, SelfChannel, SelfAuto, SelfRollback,
 };
 
@@ -73,6 +78,8 @@ static float g_toastAnim = 0;
 static mouse::State g_ms;
 static float g_ring = 0;                 // battery ring, animated (0-1)
 static bool g_lowAlerted = false;
+static std::vector<battery::Sample> g_history;   // DataDir()\battery-history.csv
+static battery::Estimate g_estimate;
 
 // one text field at a time: the DPI box or a profile name
 struct Edit { bool active = false; Hit kind = Hit::None; int index = -1; std::wstring text; };
@@ -89,15 +96,49 @@ static bool g_quitting = false;
 static UINT g_taskbarCreated = 0;
 static HDEVNOTIFY g_devNotify = nullptr;
 
-enum : UINT_PTR { TIMER_ANIM = 1, TIMER_CARET, TIMER_TOAST, TIMER_SELF, TIMER_HEALTHY, TIMER_HANGAR_HEALTH, TIMER_MIGRATE };
-static bool g_animTimer = false;
+enum : UINT_PTR { TIMER_ANIM = 1, TIMER_CARET, TIMER_TOAST, TIMER_SELF, TIMER_HEALTHY, TIMER_HANGAR_HEALTH, TIMER_MIGRATE,
+                  TIMER_FOREGROUND, TIMER_BATTERY };
 
 static const float kSidebar = 220;
 
 static void Invalidate() { if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE); }
-static void StartAnim() {
-    if (!g_animTimer && g_hwnd) { SetTimer(g_hwnd, TIMER_ANIM, 15, nullptr); g_animTimer = true; }
-    Invalidate();
+// ---------------------------------------------------------------- frames and animation
+// Halo only draws while something moves. During an animation each frame asks for the next one and
+// EndDraw waits for the display to refresh, so motion runs at the monitor's own rate (60, 144,
+// 240 Hz) and an idle Halo draws nothing. Every animation is time-based: it looks the same at any rate.
+static LARGE_INTEGER g_qpf{}, g_lastFrameQpc{};
+static float g_dt = 1.0f / 60;
+static bool g_frameMore = false;      // something on screen is still moving: draw another frame
+static float g_fps = 0;
+static int g_fpsFrames = 0;
+static LARGE_INTEGER g_fpsSince{};
+
+static void StartAnim() { Invalidate(); }
+
+static bool g_reducedNow = false;     // read once per frame
+static bool Reduced() { return g_reducedNow; }
+static bool ReducedSetting() {
+    if (g_cfg.reduceMotion) return true;
+    BOOL anim = TRUE;
+    SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &anim, 0);
+    return !anim;
+}
+
+// Moves v toward target, exponentially, `speed` times per second. Returns the new value.
+static float Ease(float& v, float target, float speed, float settle = 0.002f) {
+    if (Reduced()) { v = target; return v; }
+    v += (target - v) * (1.0f - std::exp(-speed * g_dt));
+    if (std::fabs(target - v) < settle) v = target;
+    else g_frameMore = true;
+    return v;
+}
+
+static inline float EaseOutCubic(float t) { t = std::clamp(t, 0.0f, 1.0f); return 1 - (1 - t) * (1 - t) * (1 - t); }
+
+// hover highlight per control, fading in and out (0-1)
+static std::map<uint64_t, float> g_hoverAmt;
+static uint64_t HKey(Hit kind, int index, int arg) {
+    return ((uint64_t)(uint32_t)kind << 48) ^ ((uint64_t)(uint32_t)(index + 1) << 24) ^ (uint64_t)(uint32_t)(arg + 1);
 }
 static bool Visible() { return g_hwnd && IsWindowVisible(g_hwnd) && !IsIconic(g_hwnd); }
 
@@ -160,7 +201,7 @@ static bool EnsureDevice() {
     UINT dpi = GetDpiForWindow(g_hwnd);
     props.dpiX = props.dpiY = (float)dpi;
     if (FAILED(d2d->CreateHwndRenderTarget(props, D2D1::HwndRenderTargetProperties(g_hwnd, D2D1::SizeU(std::max<LONG>(1, rc.right), std::max<LONG>(1, rc.bottom)),
-                                           D2D1_PRESENT_OPTIONS_NONE), &g_rt))) return false;
+                                           D2D1_PRESENT_OPTIONS_IMMEDIATELY), &g_rt))) return false;
     g_rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     g_rt->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0), &g_br);
     return true;
@@ -176,6 +217,10 @@ static bool IsHover(Hit kind, int index = -1, int arg = 0) {
 static bool IsPressed(Hit kind, int index = -1, int arg = 0) {
     return g_pressed.kind == kind && g_pressed.index == index && g_pressed.arg == arg && IsHover(kind, index, arg);
 }
+static float HoverAmt(Hit kind, int index = -1, int arg = 0) {
+    auto it = g_hoverAmt.find(HKey(kind, index, arg));
+    return it == g_hoverAmt.end() ? 0.0f : it->second;
+}
 
 enum class Btn { Primary, Secondary, Subtle, Danger };
 
@@ -186,14 +231,14 @@ static float ButtonWidth(const std::wstring& label, wchar_t glyph) {
 }
 
 static void Button(const D2D1_RECT_F& r, const std::wstring& label, wchar_t glyph, Btn style, Hit kind, int index = -1, int arg = 0, bool enabled = true) {
-    bool hot = enabled && IsHover(kind, index, arg);
+    float h = enabled ? HoverAmt(kind, index, arg) : 0.0f;
     bool down = enabled && IsPressed(kind, index, arg);
     D2D1_COLOR_F bg, fg;
     switch (style) {
-        case Btn::Primary: bg = hot ? g_t.accentHover : g_t.accent; fg = g_t.onAccent; break;
-        case Btn::Danger: bg = hot ? Alpha(g_t.bad, 0.22f) : Alpha(g_t.bad, 0.12f); fg = g_t.bad; break;
-        case Btn::Subtle: bg = hot ? g_t.surfaceHover : Alpha(g_t.surface, 0.0f); fg = g_t.text; break;
-        default: bg = hot ? g_t.surfaceStrong : Mix(g_t.surface, g_t.surfaceStrong, 0.55f); fg = g_t.text; break;
+        case Btn::Primary: bg = Mix(g_t.accent, g_t.accentHover, h); fg = g_t.onAccent; break;
+        case Btn::Danger: bg = Mix(Alpha(g_t.bad, 0.12f), Alpha(g_t.bad, 0.22f), h); fg = g_t.bad; break;
+        case Btn::Subtle: bg = Mix(Alpha(g_t.surfaceHover, 0.0f), g_t.surfaceHover, h); fg = g_t.text; break;
+        default: bg = Mix(Mix(g_t.surface, g_t.surfaceStrong, 0.55f), g_t.surfaceStrong, h); fg = g_t.text; break;
     }
     if (!enabled) { bg = Alpha(g_t.surfaceStrong, 0.5f); fg = g_t.faint; }
     if (down) bg = Mix(bg, g_t.dark ? Rgb(0x000000) : Rgb(0xFFFFFF), 0.12f);
@@ -232,20 +277,40 @@ static float SegmentedWidth(const std::vector<std::wstring>& opts) {
     return w - 6;
 }
 
+// Segmented control; the selection pill slides to the option you pick
+struct SegAnim { float x = 0, w = 0; int page = -1; size_t n = 0; };
+static std::map<int, SegAnim> g_seg;
+
 static void Segmented(float x, float y, const std::vector<std::wstring>& opts, int sel, Hit kind, bool enabled = true) {
+    std::vector<D2D1_RECT_F> rects;
     float cx = x;
+    for (auto& o : opts) {
+        float w = MeasureWidth(o, Format(13, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER)) + 30;
+        rects.push_back(D2D1::RectF(cx, y, cx + w, y + 32));
+        cx += w + 6;
+    }
+    for (size_t k = 0; k < opts.size(); ++k) {
+        float h = enabled ? HoverAmt(kind, -1, (int)k) : 0.0f;
+        g_c.FillRound(rects[k], 6, Mix(Mix(g_t.surface, g_t.surfaceStrong, 0.3f), g_t.surfaceHover, h));
+    }
+    SegAnim& a = g_seg[(int)kind];
+    if (sel >= 0 && sel < (int)opts.size()) {
+        float tx = rects[sel].left - x, tw = rects[sel].right - rects[sel].left;
+        if (a.page != (int)g_page || a.n != opts.size() || a.w <= 0) { a.x = tx; a.w = tw; }
+        else { Ease(a.x, tx, 20, 0.25f); Ease(a.w, tw, 20, 0.25f); }
+        a.page = (int)g_page;
+        a.n = opts.size();
+        D2D1_RECT_F p = D2D1::RectF(x + a.x, y, x + a.x + a.w, y + 32);
+        g_c.FillRound(p, 6, Mix(g_t.surface, g_t.accent, enabled ? 0.20f : 0.09f));
+        g_c.StrokeRound(p, 6, Alpha(g_t.accent, enabled ? 0.6f : 0.25f));
+    } else {
+        a.w = 0;
+    }
     for (size_t k = 0; k < opts.size(); ++k) {
         bool s = (int)k == sel;
         auto* f = Format(13, s ? DWRITE_FONT_WEIGHT_SEMI_BOLD : DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER);
-        float w = MeasureWidth(opts[k], Format(13, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER)) + 30;
-        D2D1_RECT_F r = D2D1::RectF(cx, y, cx + w, y + 32);
-        bool hot = enabled && IsHover(kind, -1, (int)k);
-        D2D1_COLOR_F bg = s ? Alpha(g_t.accent, enabled ? 0.18f : 0.08f) : (hot ? g_t.surfaceHover : Mix(g_t.surface, g_t.surfaceStrong, 0.3f));
-        g_c.FillRound(r, 6, bg);
-        if (s) g_c.StrokeRound(r, 6, Alpha(g_t.accent, enabled ? 0.6f : 0.25f));
-        g_c.Text(opts[k], f, r, !enabled ? g_t.faint : s ? g_t.text : g_t.subtext);
-        AddHot(r, kind, -1, (int)k, enabled);
-        cx += w + 6;
+        g_c.Text(opts[k], f, rects[k], !enabled ? g_t.faint : s ? g_t.text : g_t.subtext);
+        AddHot(rects[k], kind, -1, (int)k, enabled);
     }
 }
 
@@ -325,10 +390,8 @@ static std::wstring ConnectionLine() {
 static void NavItem(float y, Page p, const std::wstring& label, wchar_t glyph) {
     D2D1_RECT_F r = D2D1::RectF(10, y, kSidebar - 10, y + 36);
     bool sel = g_page == p;
-    bool hot = IsHover(Hit::Nav, -1, (int)p);
-    if (sel) g_c.FillRound(r, 6, g_t.dark ? Rgb(0xFFFFFF, 0.08f) : Rgb(0x000000, 0.06f));
-    else if (hot) g_c.FillRound(r, 6, g_t.dark ? Rgb(0xFFFFFF, 0.04f) : Rgb(0x000000, 0.035f));
-    if (sel) g_c.FillRound(D2D1::RectF(r.left, y + 10, r.left + 3, y + 26), 1.5f, g_t.accent);
+    float h = sel ? 0.0f : HoverAmt(Hit::Nav, -1, (int)p);
+    if (h > 0.01f) g_c.FillRound(r, 6, g_t.dark ? Rgb(0xFFFFFF, 0.04f * h) : Rgb(0x000000, 0.035f * h));
     g_c.Glyph(glyph, Format(15, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false, true), D2D1::RectF(r.left + 10, y, r.left + 34, y + 36),
               sel ? g_t.accent : g_t.subtext);
     g_c.Text(label, Format(13.5f, sel ? DWRITE_FONT_WEIGHT_SEMI_BOLD : DWRITE_FONT_WEIGHT_NORMAL), D2D1::RectF(r.left + 42, y, r.right - 8, y + 36), g_t.text);
@@ -341,6 +404,19 @@ static void DrawSidebar() {
     Logo(22, 22, 28);
     g_c.Text(L"Halo", Format(17, DWRITE_FONT_WEIGHT_SEMI_BOLD), D2D1::RectF(60, 20, kSidebar, 40), g_t.text);
     g_c.Text(L"UltralightX", Format(11.5f), D2D1::RectF(60, 38, kSidebar, 54), g_t.subtext);
+
+    // the selection highlight slides between pages
+    float by0 = g_H - 104;
+    float targets[6] = {76, 114, 152, 190, by0 - 38, by0};
+    static float navY = -1;
+    static int navPage = -1;
+    float ty = targets[(int)g_page];
+    if (navY < 0 || navPage == (int)g_page) navY = ty;   // same page (or a resize): stay put
+    else Ease(navY, ty, 18, 0.3f);
+    if (navY == ty) navPage = (int)g_page;
+    D2D1_RECT_F hl = D2D1::RectF(10, navY, kSidebar - 10, navY + 36);
+    g_c.FillRound(hl, 6, g_t.dark ? Rgb(0xFFFFFF, 0.08f) : Rgb(0x000000, 0.06f));
+    g_c.FillRound(D2D1::RectF(hl.left, navY + 10, hl.left + 3, navY + 26), 1.5f, g_t.accent);
 
     float y = 76;
     NavItem(y, Page::Overview, L"Overview", icon::Home); y += 38;
@@ -445,8 +521,7 @@ static bool NoMouseCard(PageFrame& f, bool forSettings) {
 // ---------------------------------------------------------------- overview
 static void Tile(const D2D1_RECT_F& r, wchar_t glyph, const std::wstring& label, const std::wstring& value, const std::wstring& unit,
                  const std::wstring& sub, Page target, int arg) {
-    bool hot = IsHover(Hit::GoPage, (int)target, arg);
-    g_c.FillRound(r, 10, hot ? g_t.surfaceHover : g_t.surface);
+    g_c.FillRound(r, 10, Mix(g_t.surface, g_t.surfaceHover, target == Page::Overview ? 0.0f : HoverAmt(Hit::GoPage, (int)target, arg)));
     g_c.Glyph(glyph, Format(14, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false, true), D2D1::RectF(r.left + 16, r.top + 14, r.left + 36, r.top + 34), g_t.accent);
     g_c.Text(label, Format(12.5f), D2D1::RectF(r.left + 40, r.top + 14, r.right - 12, r.top + 34), g_t.subtext);
     auto* vf = Format(26, DWRITE_FONT_WEIGHT_SEMI_BOLD);
@@ -463,6 +538,139 @@ static void SignalBars(float x, float y, int bars, D2D1_COLOR_F on) {
         D2D1_RECT_F b = D2D1::RectF(x + k * 7, y + 18 - h, x + k * 7 + 4.5f, y + 18);
         g_c.FillRound(b, 1.5f, k < bars ? on : Alpha(g_t.text, 0.14f));
     }
+}
+
+// ---------------------------------------------------------------- battery history
+static std::wstring HistoryPath() { return DataDir() + L"\\battery-history.csv"; }
+
+static void LoadHistory() {
+    std::wstring text;
+    if (ReadTextFile(HistoryPath(), text)) g_history = battery::Parse(WideToUtf8(text));
+}
+
+static void RecordBattery() {
+    if (!g_ms.Linked() || g_ms.t.batteryMv <= 0) return;
+    battery::Sample smp;
+    smp.t = (int64_t)time(nullptr);
+    smp.pct = g_ms.BatteryPercent();
+    smp.mv = g_ms.t.batteryMv;
+    smp.charging = g_ms.t.charging == 1;
+    if (smp.pct < 0) return;
+    if (battery::Add(g_history, smp)) WriteTextFileAtomic(HistoryPath(), Utf8ToWide(battery::ToCsv(g_history)));
+    g_estimate = battery::EstimateLeft(g_history, smp.pct);
+}
+
+static std::wstring TrayExtra() {
+    if (g_estimate.hoursLeft < 0) return L"";
+    std::wstring h = battery::FormatHours(g_estimate.hoursLeft);
+    if (!h.empty() && h[0] == L'A') h = L"a" + h.substr(1);   // "about 6 h left"
+    return h + L" left";
+}
+
+static std::wstring AgoText(int64_t t) {
+    int64_t d = (int64_t)time(nullptr) - t;
+    if (d < 3600) return L"under an hour ago";
+    if (d < 24 * 3600) { long h = (long)(d / 3600); return std::to_wstring(h) + (h == 1 ? L" hour ago" : L" hours ago"); }
+    long days = (long)(d / 86400);
+    return days == 1 ? L"yesterday" : std::to_wstring(days) + L" days ago";
+}
+
+static void DrawBatteryHistory(PageFrame& f) {
+    D2D1_RECT_F card = Section(f, L"BATTERY · LAST 7 DAYS", 176);
+    float panelW = std::min(250.0f, (card.right - card.left) * 0.34f);
+    D2D1_RECT_F plot = D2D1::RectF(card.left + 44, card.top + 18, card.right - panelW - 24, card.bottom - 34);
+    int64_t now = (int64_t)time(nullptr), from = now - 7 * 86400;
+    auto X = [&](int64_t t) { return plot.left + (float)(t - from) / (float)(now - from) * (plot.right - plot.left); };
+    auto Y = [&](int pct) { return plot.bottom - pct / 100.0f * (plot.bottom - plot.top); };
+    // grid: 0 / 50 / 100 and midnights
+    auto* small = Format(11);
+    for (int p : {0, 50, 100}) {
+        g_c.Line(plot.left, Y(p), plot.right, Y(p), Alpha(g_t.text, p == 0 ? 0.12f : 0.06f));
+        g_c.Text(std::to_wstring(p) + L"%", Format(11, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING),
+                 D2D1::RectF(card.left, Y(p) - 8, plot.left - 8, Y(p) + 8), g_t.faint);
+    }
+    static const wchar_t* days[] = {L"Sun", L"Mon", L"Tue", L"Wed", L"Thu", L"Fri", L"Sat"};
+    time_t tt = (time_t)now;
+    tm lt{};
+    localtime_s(&lt, &tt);
+    int64_t midnight = now - (lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec);
+    for (int k = 0; k < 7; ++k) {
+        int64_t m = midnight - k * 86400;
+        if (m < from) break;
+        float x = X(m);
+        g_c.Line(x, plot.top, x, plot.bottom, Alpha(g_t.text, 0.05f));
+        int wd = ((lt.tm_wday - k) % 7 + 7) % 7;
+        float nx = std::min(plot.right, X(m + 86400));
+        g_c.Text(k == 0 ? L"Today" : days[wd], Format(11, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER),
+                 D2D1::RectF(x, plot.bottom + 6, nx, plot.bottom + 22), g_t.faint);
+    }
+    // the line, broken where the mouse was off or asleep; charging stretches in green
+    size_t first = 0;
+    while (first < g_history.size() && g_history[first].t < from) ++first;
+    bool any = false;
+    for (size_t i = first; i < g_history.size();) {
+        size_t j = i + 1;
+        while (j < g_history.size() && g_history[j].t - g_history[j - 1].t <= battery::kGap) ++j;
+        if (j - i >= 2) {
+            any = true;
+            ID2D1PathGeometry* area = nullptr;
+            ID2D1PathGeometry* line = nullptr;
+            d2d->CreatePathGeometry(&area);
+            d2d->CreatePathGeometry(&line);
+            ID2D1GeometrySink* a = nullptr;
+            ID2D1GeometrySink* l = nullptr;
+            if (area && line && SUCCEEDED(area->Open(&a)) && SUCCEEDED(line->Open(&l))) {
+                a->BeginFigure(D2D1::Point2F(X(g_history[i].t), plot.bottom), D2D1_FIGURE_BEGIN_FILLED);
+                l->BeginFigure(D2D1::Point2F(X(g_history[i].t), Y(g_history[i].pct)), D2D1_FIGURE_BEGIN_HOLLOW);
+                for (size_t k = i; k < j; ++k) {
+                    D2D1_POINT_2F p = D2D1::Point2F(X(g_history[k].t), Y(g_history[k].pct));
+                    a->AddLine(p);
+                    if (k > i) l->AddLine(p);
+                }
+                a->AddLine(D2D1::Point2F(X(g_history[j - 1].t), plot.bottom));
+                a->EndFigure(D2D1_FIGURE_END_CLOSED);
+                l->EndFigure(D2D1_FIGURE_END_OPEN);
+                a->Close();
+                l->Close();
+                g_br->SetColor(Alpha(g_t.accent, 0.13f));
+                g_rt->FillGeometry(area, g_br);
+                g_br->SetColor(g_t.accent);
+                g_rt->DrawGeometry(line, g_br, 2.0f);
+            }
+            if (a) a->Release();
+            if (l) l->Release();
+            if (area) area->Release();
+            if (line) line->Release();
+            for (size_t k = i + 1; k < j; ++k)
+                if (g_history[k].charging || g_history[k - 1].charging)
+                    g_c.Line(X(g_history[k - 1].t), Y(g_history[k - 1].pct), X(g_history[k].t), Y(g_history[k].pct), g_t.good, 2.5f);
+        }
+        i = j;
+    }
+    if (!any) {
+        g_c.Text(L"Halo records the battery every 5 minutes while the mouse is awake. The graph fills in over the next few hours.",
+                 Format(12.5f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, true),
+                 D2D1::RectF(plot.left + 20, plot.top + 30, plot.right - 20, plot.bottom - 10), g_t.subtext);
+    }
+    // the estimate
+    D2D1_RECT_F pr = D2D1::RectF(card.right - panelW, card.top + 18, card.right - 20, card.bottom - 16);
+    g_c.Line(pr.left - 10, pr.top, pr.left - 10, pr.bottom, g_t.divider);
+    bool charging = g_ms.t.charging == 1;
+    std::wstring head, sub1, sub2;
+    if (charging) { head = L"Charging"; sub1 = L"The level reads high while it charges"; }
+    else if (g_estimate.hoursLeft >= 0) {
+        head = battery::FormatHours(g_estimate.hoursLeft);
+        sub1 = L"left at your usual pace";
+        wchar_t r[64];
+        swprintf(r, 64, L"Uses about %.1f%% an hour", g_estimate.ratePerHour);
+        sub2 = r;
+    } else { head = L"Estimating…"; sub1 = L"Needs a couple of hours of use since the last charge"; }
+    g_c.Text(head, Format(20, DWRITE_FONT_WEIGHT_SEMI_BOLD), D2D1::RectF(pr.left + 8, pr.top, pr.right, pr.top + 30), charging ? g_t.good : g_t.text);
+    g_c.Text(sub1, Format(12, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true), D2D1::RectF(pr.left + 8, pr.top + 32, pr.right, pr.top + 64), g_t.subtext);
+    if (!sub2.empty()) g_c.Text(sub2, Format(12), D2D1::RectF(pr.left + 8, pr.top + 66, pr.right, pr.top + 84), g_t.subtext);
+    if (g_estimate.lastCharged > 0)
+        g_c.Text(L"Last charged " + AgoText(g_estimate.lastCharged), Format(12), D2D1::RectF(pr.left + 8, pr.bottom - 20, pr.right, pr.bottom), g_t.faint);
+    (void)small;
 }
 
 static void DrawOverview(float x0) {
@@ -490,7 +698,7 @@ static void DrawOverview(float x0) {
         Arc(cx, cy, rr, g_ring, Alpha(col, 0.18f), 22);
         Arc(cx, cy, rr, g_ring, col, 12);
     }
-    std::wstring big = pct >= 0 ? std::to_wstring(pct) : L"—";
+    std::wstring big = pct >= 0 ? std::to_wstring((int)std::lround(g_ring * 100)) : L"—";
     auto* nf = Format(40, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER);
     float nw = MeasureWidth(big, nf);
     g_c.Text(big, nf, D2D1::RectF(cx - 70, cy - 30, cx + 70, cy + 18), pct >= 0 ? g_t.text : g_t.faint);
@@ -518,6 +726,7 @@ static void DrawOverview(float x0) {
     Tile(D2D1::RectF(tx + tw + gap, ty + th + gap, f.right, ty + 2 * th + gap), icon::Sliders, L"Lift-off distance", lod, t.liftOffMm > 0 ? L"mm" : L"",
          L"", Page::Performance, 3);
     f.y = (narrow ? ty + 2 * th + gap : b.bottom) + 26;
+    DrawBatteryHistory(f);
 
     // details
     struct Row { std::wstring k, v; };
@@ -541,6 +750,133 @@ static void DrawOverview(float x0) {
     Button(D2D1::RectF(f.right - 168, f.y - 18, f.right, f.y + 14), L"Read again", icon::Refresh, Btn::Subtle, Hit::SetRefresh);
     f.y += 30;
     EndPage(f);
+}
+
+// ---------------------------------------------------------------- polling test
+// Counts the raw reports Windows receives from the mouse while you move it. Reports are drained in
+// batches (GetRawInputBuffer), so even 8000 Hz costs little.
+struct PollTestState {
+    bool active = false;
+    LARGE_INTEGER bucketStart{};
+    int bucketCount = 0;
+    float shown = 0;              // eased display value
+    float measured = 0;           // last full bucket
+    float peak = 0;
+    DWORD lastEvent = 0;
+    std::vector<float> history;   // last few seconds, one value per bucket
+    bool sawUlx = false;
+    std::map<HANDLE, bool> isUlx;
+};
+static PollTestState g_pt;
+
+static void StopPollTest() {
+    if (!g_pt.active) return;
+    RAWINPUTDEVICE rid{0x01, 0x02, RIDEV_REMOVE, nullptr};
+    RegisterRawInputDevices(&rid, 1, sizeof(rid));
+    g_pt.active = false;
+}
+
+static void StartPollTest() {
+    RAWINPUTDEVICE rid{0x01, 0x02, 0, g_hwnd};   // generic desktop / mouse, while Halo is in front
+    if (!RegisterRawInputDevices(&rid, 1, sizeof(rid))) { Toast(L"Windows didn't allow the polling test.", true); return; }
+    g_pt = PollTestState{};
+    g_pt.active = true;
+    QueryPerformanceCounter(&g_pt.bucketStart);
+}
+
+static bool RawIsUlx(HANDLE dev) {
+    auto it = g_pt.isUlx.find(dev);
+    if (it != g_pt.isUlx.end()) return it->second;
+    wchar_t name[512] = {};
+    UINT n = 512;
+    bool ulx = GetRawInputDeviceInfoW(dev, RIDI_DEVICENAME, name, &n) != (UINT)-1 && IContains(name, L"vid_361d");
+    g_pt.isUlx[dev] = ulx;
+    return ulx;
+}
+
+static void CountRaw(const RAWINPUT* r) {
+    if (r->header.dwType != RIM_TYPEMOUSE) return;
+    if (r->data.mouse.lLastX == 0 && r->data.mouse.lLastY == 0) return;   // buttons / wheel only
+    bool ulx = RawIsUlx(r->header.hDevice);
+    if (ulx && !g_pt.sawUlx) { g_pt.sawUlx = true; g_pt.bucketCount = 0; }   // from now on, only the UltralightX
+    if (g_pt.sawUlx && !ulx) return;
+    ++g_pt.bucketCount;
+    g_pt.lastEvent = GetTickCount();
+}
+
+static void OnRawInput(LPARAM lp) {
+    if (!g_pt.active) return;
+    alignas(8) BYTE one[sizeof(RAWINPUT) + 64];
+    UINT size = sizeof(one);
+    if (GetRawInputData((HRAWINPUT)lp, RID_INPUT, one, &size, sizeof(RAWINPUTHEADER)) != (UINT)-1) CountRaw((RAWINPUT*)one);
+    static std::vector<uint64_t> buf(4096);   // 32 KB, 8-byte aligned
+    for (;;) {
+        UINT cb = (UINT)(buf.size() * sizeof(uint64_t));
+        UINT n = GetRawInputBuffer((RAWINPUT*)buf.data(), &cb, sizeof(RAWINPUTHEADER));
+        if (n == 0 || n == (UINT)-1) break;
+        RAWINPUT* r = (RAWINPUT*)buf.data();
+        for (UINT i = 0; i < n; ++i) {
+            CountRaw(r);
+            r = (RAWINPUT*)(((uintptr_t)r + r->header.dwSize + 7) & ~(uintptr_t)7);   // NEXTRAWINPUTBLOCK
+        }
+    }
+}
+
+// called every frame while the test runs: close 250 ms buckets
+static void TickPollTest() {
+    if (!g_pt.active) return;
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    double span = double(now.QuadPart - g_pt.bucketStart.QuadPart) / g_qpf.QuadPart;
+    if (span >= 0.25) {
+        bool moving = GetTickCount() - g_pt.lastEvent < 60;
+        float hz = moving && g_pt.bucketCount > 2 ? (float)(g_pt.bucketCount / span) : 0.0f;
+        g_pt.measured = hz;
+        if (hz > g_pt.peak) g_pt.peak = hz;
+        g_pt.history.push_back(hz);
+        if (g_pt.history.size() > 24) g_pt.history.erase(g_pt.history.begin());
+        g_pt.bucketCount = 0;
+        g_pt.bucketStart = now;
+    }
+    Ease(g_pt.shown, g_pt.measured, 10, 1.0f);
+    g_frameMore = true;   // live readout
+}
+
+static void DrawPollTest(PageFrame& f) {
+    D2D1_RECT_F s = Section(f, L"POLLING TEST", 132);
+    TickPollTest();
+    bool on = g_pt.active;
+    g_c.Text(on ? L"Move the mouse in quick, steady circles" : L"Check the rate your PC actually receives",
+             Format(14), D2D1::RectF(s.left + 18, s.top + 14, s.right - 330, s.top + 34), g_t.text);
+    g_c.Text(on ? L"Only while Halo is in front. Short pauses read as 0."
+                : L"Halo counts the mouse's reports to Windows while you move it",
+             Format(12), D2D1::RectF(s.left + 18, s.top + 34, s.right - 330, s.top + 52), g_t.subtext);
+    Button(D2D1::RectF(s.left + 18, s.top + 70, s.left + 140, s.top + 102), on ? L"Stop" : L"Start test", on ? icon::Cancel : icon::Play,
+           on ? Btn::Secondary : Btn::Primary, Hit::PollTest);
+    // readout
+    float rx = s.right - 320;
+    std::wstring big = on && g_pt.shown >= 1 ? Thousands((int)std::lround(g_pt.shown)) : L"—";
+    auto* bf = Format(30, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+    float bw = MeasureWidth(big, bf);
+    g_c.Text(big, bf, D2D1::RectF(rx, s.top + 14, rx + 200, s.top + 56), on ? g_t.text : g_t.faint);
+    if (big != L"—") g_c.Text(L"Hz", Format(14), D2D1::RectF(rx + bw + 6, s.top + 28, rx + 260, s.top + 50), g_t.subtext);
+    std::wstring line;
+    if (on) {
+        line = L"Peak " + Thousands((int)std::lround(g_pt.peak));
+        if (g_ms.t.pollingHz > 0) line += L" · set to " + Thousands(g_ms.t.pollingHz);
+        line += g_pt.sawUlx ? L" · UltralightX" : L" · all mice";
+    } else if (g_pt.peak > 0) {
+        line = L"Last test peaked at " + Thousands((int)std::lround(g_pt.peak)) + L" Hz";
+    }
+    g_c.Text(line, Format(12), D2D1::RectF(rx, s.top + 56, s.right - 18, s.top + 74), g_t.subtext);
+    // the last few seconds as bars
+    float bx = rx, by = s.bottom - 16, bh = 40;
+    float scale = std::max({(float)g_ms.t.pollingHz, g_pt.peak, 1000.0f});
+    for (size_t k = 0; k < 24; ++k) {
+        float v = k < g_pt.history.size() ? g_pt.history[k] : 0.0f;
+        float h = std::max(2.0f, v / scale * bh);
+        g_c.FillRound(D2D1::RectF(bx + k * 12.5f, by - h, bx + k * 12.5f + 8, by), 2, v > 0 ? g_t.accent : Alpha(g_t.text, 0.10f));
+    }
 }
 
 // ---------------------------------------------------------------- performance
@@ -634,6 +970,7 @@ static void DrawPerformance(float x0) {
     Divider(s2, s2.top + 128);
     RowLabel(s2, s2.top + 132, L"Lift-off distance", L"How high you can lift the mouse before it stops tracking");
     Segmented(s2.right - 18 - SegmentedWidth({L"1 mm", L"2 mm"}), s2.top + 144, {L"1 mm", L"2 mm"}, t.liftOffMm == 1 ? 0 : t.liftOffMm == 2 ? 1 : -1, Hit::LiftOff, en);
+    DrawPollTest(f);
     EndPage(f);
 }
 
@@ -694,7 +1031,21 @@ static std::wstring ProfileSummary(const Profile& p) {
     return s;
 }
 
-static void ApplyProfile(const Profile& p) {
+enum class From { Window, Outside, Auto };   // where a change came from: the window shows a toast, the rest the OSD
+
+static void ShowOsd(const std::wstring& title, const std::wstring& sub, float level) {
+    if (!g_cfg.osd) return;
+    if (Visible() && GetForegroundWindow() == g_hwnd) return;   // you're looking at Halo already
+    osd::Show(title, sub, level, g_t.accent);
+}
+
+// automatic per-app profiles
+static int g_autoActive = -1;          // the profile switched to for the app in front (-1: none)
+static Profile g_baseline;             // what to go back to afterwards
+static std::wstring g_foregroundExe;
+static HWINEVENTHOOK g_fgHook = nullptr;
+
+static void SendProfile(const Profile& p) {
     mouse::SetDpi(p.dpi);
     mouse::SetPollingRate(p.polling);
     mouse::SetMotionSync(p.motionSync != 0);
@@ -702,7 +1053,152 @@ static void ApplyProfile(const Profile& p) {
     mouse::SetDongleLed(p.dongleLed);
     mouse::SetScrollMode(p.scrollMode);
     if (p.scrollMode > 0) mouse::SetScrollTimeout(p.scrollTimeout);
-    Toast(L"Switched to " + p.name + L".");
+}
+
+static void ApplyProfile(const Profile& p, From from) {
+    SendProfile(p);
+    if (from != From::Auto) g_autoActive = -1;   // picked by hand: stay on it
+    if (from == From::Window) Toast(L"Switched to " + p.name + L".");
+    else ShowOsd(p.name, Thousands(p.dpi) + L" DPI · " + Thousands(p.polling) + L" Hz", -1);
+}
+
+static std::wstring ExeOfWindow(HWND w) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(w, &pid);
+    std::wstring name;
+    if (HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)) {
+        wchar_t buf[MAX_PATH];
+        DWORD n = MAX_PATH;
+        if (QueryFullProcessImageNameW(p, 0, buf, &n)) name = Lower(PathName(buf));
+        CloseHandle(p);
+    }
+    return name;
+}
+
+static void CheckForeground() {
+    if (!g_cfg.autoSwitch || !CanWrite() || !g_ms.readComplete) return;
+    HWND fg = GetForegroundWindow();
+    if (!fg || fg == g_hwnd) return;               // Halo itself doesn't change anything
+    std::wstring exe = ExeOfWindow(fg);
+    if (exe.empty() || exe == Lower(HALO_EXE_NAME)) return;
+    g_foregroundExe = exe;
+    int match = -1;
+    for (size_t k = 0; k < g_cfg.profiles.size() && match < 0; ++k)
+        for (auto& a : g_cfg.profiles[k].apps) if (a == exe) { match = (int)k; break; }
+    if (match == g_autoActive) return;
+    if (match >= 0) {
+        if (g_autoActive < 0) g_baseline = CurrentAsProfile(L"Your settings");
+        g_autoActive = match;
+        const Profile& p = g_cfg.profiles[match];
+        Log(L"auto profile: %ls for %ls", p.name.c_str(), exe.c_str());
+        SendProfile(p);
+        ShowOsd(p.name, L"Switched for " + exe, -1);
+    } else {
+        g_autoActive = -1;
+        Log(L"auto profile: back to your settings (%ls)", exe.c_str());
+        SendProfile(g_baseline);
+        ShowOsd(L"Your settings", Thousands(g_baseline.dpi) + L" DPI · " + Thousands(g_baseline.polling) + L" Hz", -1);
+    }
+    StartAnim();
+}
+
+static void CALLBACK ForegroundChanged(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) {
+    // Alt+Tab passes through several windows; act on where it lands
+    if (g_hwnd) SetTimer(g_hwnd, TIMER_FOREGROUND, 350, nullptr);
+}
+
+// hotkeys
+enum { HK_DPI_UP = 1, HK_DPI_DOWN, HK_PROFILE };
+static std::wstring g_hotkeyError;
+
+static void RegisterHotkeys() {
+    UnregisterHotKey(g_hwnd, HK_DPI_UP);
+    UnregisterHotKey(g_hwnd, HK_DPI_DOWN);
+    UnregisterHotKey(g_hwnd, HK_PROFILE);
+    g_hotkeyError.clear();
+    if (!g_cfg.hotkeys) return;
+    struct { int id; UINT vk; const wchar_t* name; } keys[] = {
+        {HK_DPI_UP, VK_UP, L"Ctrl+Alt+Up"}, {HK_DPI_DOWN, VK_DOWN, L"Ctrl+Alt+Down"}, {HK_PROFILE, 'P', L"Ctrl+Alt+P"}};
+    for (auto& k : keys)
+        if (!RegisterHotKey(g_hwnd, k.id, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, k.vk))
+            g_hotkeyError += (g_hotkeyError.empty() ? L"" : L", ") + std::wstring(k.name);
+    if (!g_hotkeyError.empty()) g_hotkeyError += L" taken by another app";
+}
+
+static void CycleDpi(int dir) {
+    if (!CanWrite() || g_cfg.dpiPresets.empty() || g_ms.t.dpi <= 0) return;
+    std::vector<int> p = g_cfg.dpiPresets;
+    std::sort(p.begin(), p.end());
+    int cur = g_ms.t.dpi, next = dir > 0 ? p.front() : p.back();
+    if (dir > 0) { for (int v : p) if (v > cur) { next = v; break; } }
+    else { for (auto it = p.rbegin(); it != p.rend(); ++it) if (*it < cur) { next = *it; break; } }
+    mouse::SetDpi(next);
+    size_t idx = std::find(p.begin(), p.end(), next) - p.begin();
+    ShowOsd(Thousands(next) + L" DPI", L"Preset " + std::to_wstring(idx + 1) + L" of " + std::to_wstring(p.size()), (idx + 1) / (float)p.size());
+}
+
+static void CycleProfile() {
+    if (!CanWrite() || g_cfg.profiles.empty()) return;
+    int cur = -1;
+    for (size_t k = 0; k < g_cfg.profiles.size(); ++k) if (ProfileActive(g_cfg.profiles[k])) { cur = (int)k; break; }
+    ApplyProfile(g_cfg.profiles[(cur + 1) % g_cfg.profiles.size()], From::Outside);
+}
+
+// the running apps you can attach to a profile: visible top-level windows, by exe
+static std::vector<std::wstring> RunningApps() {
+    std::vector<std::wstring> out;
+    EnumWindows([](HWND w, LPARAM lp) -> BOOL {
+        auto* list = (std::vector<std::wstring>*)lp;
+        if (!IsWindowVisible(w) || GetWindow(w, GW_OWNER) || (GetWindowLongW(w, GWL_EXSTYLE) & WS_EX_TOOLWINDOW)) return TRUE;
+        if (GetWindowTextLengthW(w) == 0) return TRUE;
+        BOOL cloaked = FALSE;
+        DwmGetWindowAttribute(w, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
+        if (cloaked) return TRUE;
+        std::wstring exe = ExeOfWindow(w);
+        static const wchar_t* skip[] = {L"explorer.exe", L"applicationframehost.exe", L"textinputhost.exe", L"shellexperiencehost.exe",
+                                        L"searchhost.exe", L"startmenuexperiencehost.exe", L"lockapp.exe", L"systemsettings.exe"};
+        if (exe.empty() || exe == Lower(HALO_EXE_NAME)) return TRUE;
+        for (auto* k : skip) if (exe == k) return TRUE;
+        if (std::find(list->begin(), list->end(), exe) == list->end()) list->push_back(exe);
+        return TRUE;
+    }, (LPARAM)&out);
+    std::sort(out.begin(), out.end());
+    if (out.size() > 40) out.resize(40);
+    return out;
+}
+
+static void AddAppToProfile(int index) {
+    if (index < 0 || index >= (int)g_cfg.profiles.size()) return;
+    auto apps = RunningApps();
+    HMENU m = CreatePopupMenu();
+    AppendMenuW(m, MF_STRING | MF_GRAYED, 0, L"Switch to this profile while this app is in front:");
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    for (size_t k = 0; k < apps.size(); ++k) AppendMenuW(m, MF_STRING, 1 + k, apps[k].c_str());
+    if (apps.empty()) AppendMenuW(m, MF_STRING | MF_GRAYED, 0, L"(no other apps open)");
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(m, MF_STRING, 1000, L"Choose an .exe file…");
+    POINT pt;
+    GetCursorPos(&pt);
+    UINT cmd = TrackPopupMenuEx(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, g_hwnd, nullptr);
+    DestroyMenu(m);
+    std::wstring exe;
+    if (cmd >= 1 && cmd <= apps.size()) exe = apps[cmd - 1];
+    else if (cmd == 1000) {
+        wchar_t file[MAX_PATH] = {};
+        OPENFILENAMEW ofn{sizeof(ofn)};
+        ofn.hwndOwner = g_hwnd;
+        ofn.lpstrFilter = L"Programs (*.exe)\0*.exe\0";
+        ofn.lpstrFile = file;
+        ofn.nMaxFile = MAX_PATH;
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
+        if (GetOpenFileNameW(&ofn)) exe = Lower(PathName(file));
+    }
+    if (exe.empty()) return;
+    // an app belongs to one profile
+    for (auto& p : g_cfg.profiles) p.apps.erase(std::remove(p.apps.begin(), p.apps.end(), exe), p.apps.end());
+    g_cfg.profiles[index].apps.push_back(exe);
+    ConfigSave();
+    Toast(g_cfg.profiles[index].name + L" now switches on for " + exe + L".");
 }
 
 static void DrawProfiles(float x0) {
@@ -723,23 +1219,57 @@ static void DrawProfiles(float x0) {
     }
     for (size_t k = 0; k < g_cfg.profiles.size(); ++k) {
         const Profile& p = g_cfg.profiles[k];
-        D2D1_RECT_F r = D2D1::RectF(f.left, f.y, f.right, f.y + 76);
+        D2D1_RECT_F r = D2D1::RectF(f.left, f.y, f.right, f.y + 118);
         bool active = ProfileActive(p);
         g_c.FillRound(r, 10, g_t.surface);
         if (active) g_c.StrokeRound(r, 10, Alpha(g_t.accent, 0.6f), 1.5f);
         float nameW = std::min(260.0f, r.right - r.left - 300);
         TextField(D2D1::RectF(r.left + 12, r.top + 10, r.left + 12 + nameW, r.top + 40), p.name, Hit::ProfileName, (int)k, true,
                   Format(14.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD), g_t.text, true);
-        if (active) Pill(r.left + 22 + nameW, r.top + 15, L"Active", g_t.accent);
+        float px = r.left + 22 + nameW;
+        if (active) px += Pill(px, r.top + 15, L"Active", g_t.accent) + 6;
+        if (g_autoActive == (int)k) Pill(px, r.top + 15, L"Auto · " + g_foregroundExe, g_t.info);
         g_c.Text(ProfileSummary(p), Format(12.5f), D2D1::RectF(r.left + 24, r.top + 44, r.right - 230, r.top + 66), g_t.subtext);
         Button(D2D1::RectF(r.right - 186, r.top + 22, r.right - 62, r.top + 54), active ? L"Applied" : L"Apply", icon::Play, Btn::Primary,
                Hit::ProfileApply, (int)k, 0, en && !active);
         Button(D2D1::RectF(r.right - 54, r.top + 22, r.right - 18, r.top + 54), L"", icon::Delete, Btn::Subtle, Hit::ProfileDelete, (int)k);
-        f.y += 76 + 10;
+        // apps that switch to it
+        float ay = r.top + 78, ax = r.left + 24;
+        g_c.Text(L"Auto-switch for", Format(12), D2D1::RectF(ax, ay, ax + 110, ay + 26), g_t.faint);
+        ax += 108;
+        auto* cf = Format(12, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+        for (size_t a = 0; a < p.apps.size(); ++a) {
+            float w = MeasureWidth(p.apps[a], cf) + 40;
+            if (ax + w > r.right - 140) { g_c.Text(L"+" + std::to_wstring(p.apps.size() - a) + L" more", Format(12), D2D1::RectF(ax, ay, ax + 80, ay + 26), g_t.faint); ax += 70; break; }
+            D2D1_RECT_F c = D2D1::RectF(ax, ay, ax + w, ay + 26);
+            float h = HoverAmt(Hit::ProfileRemoveApp, (int)k, (int)a);
+            g_c.FillRound(c, 13, Mix(Mix(g_t.surface, g_t.surfaceStrong, 0.6f), Alpha(g_t.bad, 0.18f), h));
+            g_c.Text(p.apps[a], cf, D2D1::RectF(c.left + 12, c.top, c.right - 24, c.bottom), g_t.text);
+            g_c.Glyph(icon::Cancel, Format(8, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false, true),
+                      D2D1::RectF(c.right - 24, c.top, c.right - 6, c.bottom), Mix(g_t.faint, g_t.bad, h));
+            AddHot(c, Hit::ProfileRemoveApp, (int)k, (int)a);
+            ax += w + 6;
+        }
+        {
+            std::wstring l = p.apps.empty() ? L"Add a game or app" : L"Add";
+            float w = MeasureWidth(l, Format(12)) + 34;
+            D2D1_RECT_F c = D2D1::RectF(ax, ay, ax + w, ay + 26);
+            float h = HoverAmt(Hit::ProfileAddApp, (int)k);
+            g_c.FillRound(c, 13, Mix(Alpha(g_t.surfaceHover, 0), g_t.surfaceHover, h));
+            g_c.StrokeRound(c, 13, Alpha(g_t.text, 0.22f));
+            g_c.Glyph(icon::Add, Format(9, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false, true), D2D1::RectF(c.left + 6, c.top, c.left + 24, c.bottom), g_t.subtext);
+            g_c.Text(l, Format(12), D2D1::RectF(c.left + 24, c.top, c.right - 4, c.bottom), g_t.subtext);
+            AddHot(c, Hit::ProfileAddApp, (int)k);
+        }
+        f.y += 118 + 10;
     }
     f.y += 4;
-    g_c.Text(L"Click a name to rename it.", Format(12), D2D1::RectF(f.left, f.y, f.right, f.y + 18), g_t.faint);
-    f.y += 30;
+    g_c.Text(L"Click a name to rename it. Ctrl+Alt+P switches to the next profile from anywhere.", Format(12), D2D1::RectF(f.left, f.y, f.right, f.y + 18), g_t.faint);
+    f.y += 34;
+    D2D1_RECT_F sa = Section(f, L"AUTO-SWITCH", 64);
+    RowLabel(sa, sa.top + 4, L"Switch profiles for games and apps",
+             L"While an app is in front its profile is used; when you leave it, your settings come back", 160);
+    Segmented(sa.right - 18 - SegmentedWidth({L"On", L"Off"}), sa.top + 16, {L"On", L"Off"}, g_cfg.autoSwitch ? 0 : 1, Hit::SetAuto);
     EndPage(f);
 }
 
@@ -947,7 +1477,7 @@ static bool HangarInstalled() {
 static void DrawSettings(float x0) {
     PageFrame f = BeginPage(x0, L"Settings", L"", 820);
 
-    D2D1_RECT_F s1 = Section(f, L"WINDOW AND TRAY", 64 * 3);
+    D2D1_RECT_F s1 = Section(f, L"WINDOW AND TRAY", 64 * 5);
     RowLabel(s1, s1.top + 4, L"Close button", L"Halo keeps battery alerts and the tray menu going when hidden");
     Segmented(s1.right - 18 - SegmentedWidth({L"Hide to tray", L"Quit"}), s1.top + 16, {L"Hide to tray", L"Quit"}, g_cfg.closeToTray ? 0 : 1, Hit::SetClose);
     Divider(s1, s1.top + 64);
@@ -956,6 +1486,12 @@ static void DrawSettings(float x0) {
     Divider(s1, s1.top + 128);
     RowLabel(s1, s1.top + 132, L"Tray icon", L"The battery level as a number, or as a ring");
     Segmented(s1.right - 18 - SegmentedWidth({L"Number", L"Ring"}), s1.top + 144, {L"Number", L"Ring"}, g_cfg.trayPercent ? 0 : 1, Hit::SetTrayPct);
+    Divider(s1, s1.top + 192);
+    RowLabel(s1, s1.top + 196, L"Hotkeys", g_hotkeyError.empty() ? L"Ctrl+Alt+Up / Down: next DPI preset · Ctrl+Alt+P: next profile" : g_hotkeyError);
+    Segmented(s1.right - 18 - SegmentedWidth({L"On", L"Off"}), s1.top + 208, {L"On", L"Off"}, g_cfg.hotkeys ? 0 : 1, Hit::SetHotkeys);
+    Divider(s1, s1.top + 256);
+    RowLabel(s1, s1.top + 260, L"On-screen display", L"A small popup when DPI or the profile changes outside Halo");
+    Segmented(s1.right - 18 - SegmentedWidth({L"On", L"Off"}), s1.top + 272, {L"On", L"Off"}, g_cfg.osd ? 0 : 1, Hit::SetOsd);
 
     D2D1_RECT_F s2 = Section(f, L"BATTERY", 64);
     std::vector<std::wstring> lows = {L"Off", L"10%", L"15%", L"20%", L"25%"};
@@ -1020,12 +1556,18 @@ static void DrawSettings(float x0) {
         }
     }
 
-    D2D1_RECT_F s5 = Section(f, L"ADVANCED", 64 * 2);
+    D2D1_RECT_F s5 = Section(f, L"ADVANCED", 64 * 4);
     RowLabel(s5, s5.top + 4, L"Data folder", DataDir());
     Button(D2D1::RectF(s5.right - 140, s5.top + 16, s5.right - 18, s5.top + 48), L"Open", icon::Folder, Btn::Secondary, Hit::SetOpenData);
     Divider(s5, s5.top + 64);
     RowLabel(s5, s5.top + 68, L"Log", L"halo.log, for troubleshooting");
     Button(D2D1::RectF(s5.right - 140, s5.top + 80, s5.right - 18, s5.top + 112), L"Open log", 0, Btn::Secondary, Hit::SetOpenLog);
+    Divider(s5, s5.top + 128);
+    RowLabel(s5, s5.top + 132, L"Animations", L"Smooth runs at your monitor's refresh rate; nothing is drawn while Halo is idle");
+    Segmented(s5.right - 18 - SegmentedWidth({L"Smooth", L"Reduced"}), s5.top + 144, {L"Smooth", L"Reduced"}, g_cfg.reduceMotion ? 1 : 0, Hit::SetMotion);
+    Divider(s5, s5.top + 192);
+    RowLabel(s5, s5.top + 196, L"Frame rate counter", L"Shows the frame rate in the corner while something moves");
+    Segmented(s5.right - 18 - SegmentedWidth({L"On", L"Off"}), s5.top + 208, {L"On", L"Off"}, g_cfg.showFps ? 0 : 1, Hit::SetFps);
 
     D2D1_RECT_F s6 = Section(f, L"ABOUT", 64);
     RowLabel(s6, s6.top + 4, std::wstring(L"Halo ") + HALO_VERSION + (IsPortable() ? L" (portable)" : L""), L"Not made by or affiliated with Finalmouse");
@@ -1065,8 +1607,59 @@ static void DrawScrollbar() {
     g_c.FillRound(D2D1::RectF(g_W - 8, y, g_W - 4, y + thumbH), 2, g_t.dark ? Rgb(0xFFFFFF, 0.18f) : Rgb(0x000000, 0.2f));
 }
 
+static void Animate() {
+    if (Reduced()) g_scroll = g_scrollTarget;
+    else if (std::fabs(g_scrollTarget - g_scroll) > 0.4f) { g_scroll += (g_scrollTarget - g_scroll) * (1.0f - std::exp(-16.0f * g_dt)); g_frameMore = true; }
+    else g_scroll = g_scrollTarget;
+    int pct = g_ms.BatteryPercent();
+    Ease(g_ring, pct >= 0 ? pct / 100.0f : 0.0f, 5.0f, 0.0015f);
+    if (g_pageAnim < 1.0f) {
+        g_pageAnim = Reduced() ? 1.0f : std::min(1.0f, g_pageAnim + g_dt / 0.26f);
+        if (g_pageAnim < 1.0f) g_frameMore = true;
+    }
+    float toastTarget = (!g_toast.empty() && g_toastAt) ? 1.0f : 0.0f;
+    Ease(g_toastAnim, toastTarget, 14, 0.01f);
+    if (toastTarget == 0 && g_toastAnim == 0) g_toast.clear();
+    uint64_t hk = g_hover.kind != Hit::None && g_hover.enabled ? HKey(g_hover.kind, g_hover.index, g_hover.arg) : 0;
+    if (hk && !g_hoverAmt.count(hk)) g_hoverAmt[hk] = 0;
+    for (auto it = g_hoverAmt.begin(); it != g_hoverAmt.end();) {
+        float t = it->first == hk ? 1.0f : 0.0f;
+        Ease(it->second, t, 16, 0.01f);
+        if (it->second == 0 && t == 0) it = g_hoverAmt.erase(it);
+        else ++it;
+    }
+}
+
+static void DrawFps(bool continuous) {
+    if (!g_cfg.showFps) return;
+    std::wstring t = continuous && g_fps > 0 ? std::to_wstring((int)std::lround(g_fps)) + L" fps" : L"idle · 0 fps";
+    auto* f = Format(11.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER);
+    float w = MeasureWidth(t, f) + 16;
+    D2D1_RECT_F r = D2D1::RectF(g_W - w - 12, 10, g_W - 12, 30);
+    g_c.FillRound(r, 10, Alpha(g_t.surfaceStrong, 0.9f));
+    g_c.Text(t, f, r, g_t.subtext);
+}
+
 static void Paint() {
     if (!EnsureDevice()) return;
+    if (!g_qpf.QuadPart) QueryPerformanceFrequency(&g_qpf);
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    double gap = g_lastFrameQpc.QuadPart ? double(now.QuadPart - g_lastFrameQpc.QuadPart) / g_qpf.QuadPart : 1.0;
+    bool continuous = gap < 0.1;                     // the next frame of a running animation
+    g_dt = continuous ? (float)std::clamp(gap, 0.001, 0.05) : 1.0f / 60;
+    g_lastFrameQpc = now;
+    if (!continuous) { g_fpsFrames = 0; g_fpsSince = now; }
+    else if (++g_fpsFrames >= 10) {
+        double span = double(now.QuadPart - g_fpsSince.QuadPart) / g_qpf.QuadPart;
+        if (span > 0) g_fps = (float)(g_fpsFrames / span);
+        g_fpsFrames = 0;
+        g_fpsSince = now;
+    }
+    g_frameMore = false;
+    g_reducedNow = ReducedSetting();
+    Animate();
+
     D2D1_SIZE_F sz = g_rt->GetSize();
     g_W = sz.width;
     g_H = sz.height;
@@ -1077,7 +1670,8 @@ static void Paint() {
     g_rt->SetTransform(D2D1::Matrix3x2F::Identity());
     g_rt->Clear(g_t.bg);
     float x0 = kSidebar;
-    float slide = (1.0f - g_pageAnim) * 14;
+    float e = EaseOutCubic(g_pageAnim);
+    float slide = (1.0f - e) * 16;
     if (slide > 0.05f) g_rt->SetTransform(D2D1::Matrix3x2F::Translation(0, slide));
     switch (g_page) {
         case Page::Overview: DrawOverview(x0); break;
@@ -1088,28 +1682,23 @@ static void Paint() {
         case Page::Settings: DrawSettings(x0); break;
     }
     g_rt->SetTransform(D2D1::Matrix3x2F::Identity());
-    if (g_pageAnim < 0.999f) { D2D1_COLOR_F o = g_t.bg; o.a = (1.0f - g_pageAnim) * 0.85f; g_c.Fill(D2D1::RectF(x0, 0, g_W, g_H), o); }
+    if (e < 0.999f) { D2D1_COLOR_F o = g_t.bg; o.a = (1.0f - e) * 0.9f; g_c.Fill(D2D1::RectF(x0, 0, g_W, g_H), o); }
     DrawScrollbar();
     DrawSidebar();
     DrawToast();
+    DrawFps(continuous);
     HRESULT hr = g_rt->EndDraw();
-    if (hr == (HRESULT)D2DERR_RECREATE_TARGET) DiscardDevice();
+    if (hr == (HRESULT)D2DERR_RECREATE_TARGET) { DiscardDevice(); g_frameMore = true; }
     ClampScroll();
-}
 
-static bool Animate() {
-    bool more = false;
-    if (std::fabs(g_scrollTarget - g_scroll) > 0.5f) { g_scroll += (g_scrollTarget - g_scroll) * 0.28f; more = true; }
-    else g_scroll = g_scrollTarget;
-    int pct = g_ms.BatteryPercent();
-    float target = pct >= 0 ? pct / 100.0f : 0.0f;
-    if (std::fabs(g_ring - target) > 0.002f) { g_ring += (target - g_ring) * 0.12f; more = true; }
-    else g_ring = target;
-    if (g_pageAnim < 1.0f) { g_pageAnim = std::min(1.0f, g_pageAnim + 0.12f); more = true; }
-    float toastTarget = (!g_toast.empty() && g_toastAt) ? 1.0f : 0.0f;
-    if (std::fabs(g_toastAnim - toastTarget) > 0.01f) { g_toastAnim += (toastTarget - g_toastAnim) * 0.25f; more = true; }
-    else { g_toastAnim = toastTarget; if (toastTarget == 0) g_toast.clear(); }
-    return more;
+    if (g_frameMore) {
+        if (g_rt && (g_rt->CheckWindowState() & D2D1_WINDOW_STATE_OCCLUDED)) {
+            SetTimer(g_hwnd, TIMER_ANIM, 50, nullptr);   // covered: no point drawing at full speed
+        } else {
+            DwmFlush();                                   // wait for the compositor's next frame (= the display's refresh)
+            InvalidateRect(g_hwnd, nullptr, FALSE);
+        }
+    }
 }
 
 // ---------------------------------------------------------------- actions
@@ -1118,6 +1707,7 @@ static void EndEdit(bool commit);
 static void Navigate(Page p) {
     if (g_edit.active) EndEdit(false);
     if (g_page == p) return;
+    StopPollTest();
     g_page = p;
     g_cfg.page = kPageIds[(int)p];
     g_scroll = g_scrollTarget = 0;
@@ -1171,6 +1761,7 @@ static void ShowMain() {
 
 static void HideToTray() {
     if (g_edit.active) EndEdit(false);
+    StopPollTest();
     ShowWindow(g_hwnd, SW_HIDE);
     mouse::SetPollSeconds(60);
     if (!g_cfg.trayHintShown) {
@@ -1251,7 +1842,7 @@ static void ApplySelf(const std::wstring& exe, const std::wstring& version, bool
         return;
     }
     tray::Create(g_hwnd);
-    tray::Update(g_ms, g_cfg.trayPercent);
+    tray::Update(g_ms, g_cfg.trayPercent, TrayExtra());
     if (!wasVisible) ShowWindow(g_hwnd, SW_HIDE);
     DeleteFileW((DataDir() + L"\\restore.json").c_str());
     if (IStartsWith(err, L"Halo " + version + L" didn't start")) {
@@ -1309,6 +1900,7 @@ static void Click(const HotRect& h, bool right) {
             break;
         case Hit::DpiStep: StepDpi(h.arg); break;
         case Hit::DpiField: if (!g_edit.active) BeginEdit(Hit::DpiField, -1, g_ms.t.dpi > 0 ? std::to_wstring(g_ms.t.dpi) : L""); break;
+        case Hit::PollTest: if (g_pt.active) StopPollTest(); else StartPollTest(); break;
         case Hit::Poll: mouse::SetPollingRate(ulx::kPollingRates[h.arg]); break;
         case Hit::MotionSync: mouse::SetMotionSync(h.arg == 0); break;
         case Hit::LiftOff: mouse::SetLiftOff(h.arg + 1); break;
@@ -1330,15 +1922,36 @@ static void Click(const HotRect& h, bool right) {
             BeginEdit(Hit::ProfileName, (int)g_cfg.profiles.size() - 1, name);
             break;
         }
-        case Hit::ProfileApply: if (h.index >= 0 && h.index < (int)g_cfg.profiles.size()) ApplyProfile(g_cfg.profiles[h.index]); break;
+        case Hit::ProfileApply: if (h.index >= 0 && h.index < (int)g_cfg.profiles.size()) ApplyProfile(g_cfg.profiles[h.index], From::Window); break;
         case Hit::ProfileDelete:
             if (h.index >= 0 && h.index < (int)g_cfg.profiles.size()) {
                 std::wstring msg = L"Delete the profile \"" + g_cfg.profiles[h.index].name + L"\"?\n\nThe mouse keeps its current settings.";
                 if (MessageBoxW(g_hwnd, msg.c_str(), L"Delete profile", MB_OKCANCEL | MB_ICONQUESTION) == IDOK) {
                     g_cfg.profiles.erase(g_cfg.profiles.begin() + h.index);
+                    if (g_autoActive == h.index) g_autoActive = -1;
+                    else if (g_autoActive > h.index) --g_autoActive;
                     ConfigSave();
                 }
             }
+            break;
+        case Hit::ProfileAddApp: AddAppToProfile(h.index); break;
+        case Hit::ProfileRemoveApp:
+            if (h.index >= 0 && h.index < (int)g_cfg.profiles.size() && h.arg >= 0 && h.arg < (int)g_cfg.profiles[h.index].apps.size()) {
+                auto& apps = g_cfg.profiles[h.index].apps;
+                apps.erase(apps.begin() + h.arg);
+                ConfigSave();
+            }
+            break;
+        case Hit::SetAuto:
+            g_cfg.autoSwitch = h.arg == 0;
+            ConfigSave();
+            if (!g_cfg.autoSwitch && g_autoActive >= 0) { g_autoActive = -1; SendProfile(g_baseline); }
+            break;
+        case Hit::SetHotkeys: g_cfg.hotkeys = h.arg == 0; ConfigSave(); RegisterHotkeys(); break;
+        case Hit::SetOsd:
+            g_cfg.osd = h.arg == 0;
+            ConfigSave();
+            if (g_cfg.osd) osd::Show(L"On-screen display", L"Shown when you change DPI or profiles outside Halo", 0.6f, g_t.accent);
             break;
         case Hit::ProfileName:
             if (!g_edit.active && h.index >= 0 && h.index < (int)g_cfg.profiles.size()) BeginEdit(Hit::ProfileName, h.index, g_cfg.profiles[h.index].name);
@@ -1368,7 +1981,9 @@ static void Click(const HotRect& h, bool right) {
             break;
         case Hit::SetClose: g_cfg.closeToTray = h.arg == 0; ConfigSave(); break;
         case Hit::SetStartup: g_cfg.startWithWindows = h.arg == 0; ApplyStartup(g_cfg.startWithWindows); ConfigSave(); break;
-        case Hit::SetTrayPct: g_cfg.trayPercent = h.arg == 0; ConfigSave(); tray::Update(g_ms, g_cfg.trayPercent); break;
+        case Hit::SetTrayPct: g_cfg.trayPercent = h.arg == 0; ConfigSave(); tray::Update(g_ms, g_cfg.trayPercent, TrayExtra()); break;
+        case Hit::SetMotion: g_cfg.reduceMotion = h.arg == 1; ConfigSave(); break;
+        case Hit::SetFps: g_cfg.showFps = h.arg == 0; ConfigSave(); break;
         case Hit::SetLow: g_cfg.lowBattery = kLowLevels[h.arg]; g_lowAlerted = false; ConfigSave(); break;
         case Hit::SetOpenData: ShellExecuteW(g_hwnd, L"open", DataDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
         case Hit::SetOpenLog: ShellExecuteW(g_hwnd, L"open", LogPath().c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
@@ -1466,7 +2081,9 @@ static void OnChar(wchar_t c) {
 static void OnMouse() {
     mouse::State prev = g_ms;
     g_ms = mouse::Snapshot();
-    tray::Update(g_ms, g_cfg.trayPercent);
+    RecordBattery();
+    tray::Update(g_ms, g_cfg.trayPercent, TrayExtra());
+    if (g_ms.Linked() && g_ms.readComplete && !(prev.Linked() && prev.readComplete)) SetTimer(g_hwnd, TIMER_FOREGROUND, 800, nullptr);
     // battery alert, once per discharge
     int pct = g_ms.BatteryPercent();
     if (g_ms.Linked() && g_ms.t.charging == 1) g_lowAlerted = false;
@@ -1528,7 +2145,7 @@ static void OnIpc(ipc::Request& r) {
         ApplyStartup(g_cfg.startWithWindows);
         g_customThemes = LoadCustomThemes();
         ApplyTheme();
-        tray::Update(g_ms, g_cfg.trayPercent);
+        tray::Update(g_ms, g_cfg.trayPercent, TrayExtra());
         rep.Set(L"ok", json::Value::Boolean(true));
         rep.Set(L"restartRequired", json::Value::Boolean(false));
     } else if (r.type == L"export-settings") {
@@ -1557,7 +2174,7 @@ static void RegisterDeviceNotifications(HWND hwnd) {
 }
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    if (msg == g_taskbarCreated && g_taskbarCreated) { tray::Recreate(); tray::Update(g_ms, g_cfg.trayPercent); return 0; }
+    if (msg == g_taskbarCreated && g_taskbarCreated) { tray::Recreate(); tray::Update(g_ms, g_cfg.trayPercent, TrayExtra()); return 0; }
     switch (msg) {
         case WM_CREATE:
             g_hwnd = hwnd;
@@ -1597,7 +2214,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_SETTINGCHANGE:
             if (lp && wcscmp((const wchar_t*)lp, L"ImmersiveColorSet") == 0) {
                 ApplyTheme();
-                tray::Update(g_ms, g_cfg.trayPercent);   // light/dark taskbar
+                tray::Update(g_ms, g_cfg.trayPercent, TrayExtra());   // light/dark taskbar
             }
             return 0;
         case WM_DWMCOLORIZATIONCOLORCHANGED:
@@ -1673,7 +2290,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_TIMER:
             switch (wp) {
                 case TIMER_ANIM:
-                    if (!Animate()) { KillTimer(hwnd, TIMER_ANIM); g_animTimer = false; }
+                    KillTimer(hwnd, TIMER_ANIM);
                     Invalidate();
                     break;
                 case TIMER_CARET:
@@ -1707,6 +2324,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         g_quitting = true;
                         DestroyWindow(hwnd);
                     }
+                    break;
+                case TIMER_FOREGROUND:
+                    KillTimer(hwnd, TIMER_FOREGROUND);
+                    CheckForeground();
                     break;
                 case TIMER_HANGAR_HEALTH:
                     KillTimer(hwnd, TIMER_HANGAR_HEALTH);
@@ -1754,18 +2375,31 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             else if (id == tray::kCmdRefresh) mouse::Refresh();
             else if (id >= tray::kCmdDpiBase && id < tray::kCmdDpiBase + 100) {
                 size_t k = id - tray::kCmdDpiBase;
-                if (k < g_cfg.dpiPresets.size()) mouse::SetDpi(g_cfg.dpiPresets[k]);
+                if (k < g_cfg.dpiPresets.size()) {
+                    mouse::SetDpi(g_cfg.dpiPresets[k]);
+                    ShowOsd(Thousands(g_cfg.dpiPresets[k]) + L" DPI", L"Preset " + std::to_wstring(k + 1) + L" of " + std::to_wstring(g_cfg.dpiPresets.size()),
+                            (k + 1) / (float)g_cfg.dpiPresets.size());
+                }
             } else if (id >= tray::kCmdPollBase && id < tray::kCmdPollBase + 5) {
-                mouse::SetPollingRate(ulx::kPollingRates[id - tray::kCmdPollBase]);
+                int hz = ulx::kPollingRates[id - tray::kCmdPollBase];
+                mouse::SetPollingRate(hz);
+                ShowOsd(Thousands(hz) + L" Hz", L"Polling rate", (id - tray::kCmdPollBase + 1) / 5.0f);
             } else if (id >= tray::kCmdProfileBase && id < tray::kCmdProfileBase + 100) {
                 size_t k = id - tray::kCmdProfileBase;
                 if (k < g_cfg.profiles.size()) {
-                    ApplyProfile(g_cfg.profiles[k]);
-                    tray::Notify(L"Profile applied", g_cfg.profiles[k].name, false);
+                    ApplyProfile(g_cfg.profiles[k], From::Outside);
                 }
             }
             return 0;
         }
+        case WM_INPUT:
+            OnRawInput(lp);
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        case WM_HOTKEY:
+            if (wp == HK_DPI_UP) CycleDpi(1);
+            else if (wp == HK_DPI_DOWN) CycleDpi(-1);
+            else if (wp == HK_PROFILE) CycleProfile();
+            return 0;
         case WM_HALO_ACTIVATE:
             ShowMain();
             return 0;
@@ -1783,6 +2417,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case WM_DESTROY:
             if (g_devNotify) UnregisterDeviceNotification(g_devNotify);
+            if (g_fgHook) UnhookWinEvent(g_fgHook);
+            StopPollTest();
+            osd::Destroy();
             tray::Remove();
             ipc::Stop();
             mouse::Stop();
@@ -1837,10 +2474,15 @@ HWND UiCreate(HINSTANCE inst, const StartOptions& opt) {
         DeleteFileW(opt.restoreState.c_str());
     }
 
+    LoadHistory();
+    g_estimate = battery::EstimateLeft(g_history, g_history.empty() ? -1 : g_history.back().pct);
     mouse::Start(hwnd);
     tray::Create(hwnd);
     ipc::Start(hwnd);
     RegisterDeviceNotifications(hwnd);
+    RegisterHotkeys();
+    g_fgHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, ForegroundChanged, 0, 0,
+                               WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     install::RefreshRegistration();
     mouse::SetPollSeconds(show == SW_HIDE ? 60 : 10);
 
